@@ -1,86 +1,70 @@
 # KNOWN_ISSUES.md — Prism Known Issues and Limitations
 
-## Current Issues
-None yet — project is in pre-development phase.
+## v0.1.0-alpha — Current Issues
 
----
+### 1. No Live API Testing Yet
+**Severity**: High
+**Description**: All LiteLLM calls use MockLiteLLM during development. No real API calls have been made to any provider. The CompletionEngine, streaming, retry logic, and provider configs need live validation.
+**Impact**: Provider integrations may have model ID mismatches, unexpected response formats, or rate limit behavior differences.
+**Next Step**: Manual testing with real API keys (next phase).
 
-## Anticipated Issues (from product plan analysis)
-
-### 1. Token Estimation Accuracy
-**Severity**: Medium
-**Description**: Token estimates use heuristics (words × 0.75, chars × 0.4) that vary significantly across models and content types. Actual token counts from tiktoken (OpenAI), Anthropic's tokenizer, and other model-specific tokenizers can differ by 10-30%.
-**Impact**: Cost estimates may be inaccurate, leading to budget overruns or unnecessary downgrades.
-**Mitigation**: Track estimation error over time, calibrate per-model. Use actual token counts from API responses for cost tracking (not estimates).
-**Status**: To be addressed in Phase 1
-
-### 2. LiteLLM Model ID Drift
-**Severity**: Medium
-**Description**: LiteLLM frequently updates model identifiers and provider support. Model IDs like `deepseek/deepseek-chat` may change between LiteLLM versions.
-**Impact**: Provider configs may break on LiteLLM updates.
-**Mitigation**: Pin LiteLLM version, test model IDs on every update. Add integration tests that verify model ID validity.
-**Status**: To be monitored
-
-### 3. Ollama Availability Detection
+### 2. Two CostEntry Classes
 **Severity**: Low
-**Description**: Ollama may be installed but not running, or running but without the required models pulled. Need to distinguish between "Ollama not installed", "Ollama not running", and "model not available".
-**Impact**: False fallback failures when Ollama should be available.
-**Mitigation**: Health check sequence: (1) check if ollama binary exists, (2) check if server responds on :11434, (3) check if required model is available.
-**Status**: To be addressed in Phase 1
+**Description**: `prism.cost.tracker.CostEntry` (dataclass) and `prism.db.models.CostEntry` (Pydantic) coexist with slightly different field names. `save_cost_entry()` uses `hasattr` to handle both.
+**Impact**: Confusing for developers. May cause subtle bugs if one class changes.
+**Mitigation**: Unify into a single CostEntry in a future refactor.
 
-### 4. Free Tier Rate Limit Tracking
+### 3. Token Estimation Heuristic
 **Severity**: Medium
-**Description**: Tracking free tier usage (Google 1,500 req/day, Groq 14,400 req/day, 30 RPM) requires persistent counters that reset at provider-specific times (which may not be midnight UTC).
-**Impact**: May exceed free tier limits and get unexpected 429 errors.
-**Mitigation**: Track usage in SQLite, add safety margin (stop routing to free tier at 90% of limit), handle 429s gracefully with fallback.
-**Status**: To be addressed in Phase 1 Month 2
+**Description**: Token estimates use `words × 0.75` heuristic. Actual counts from tiktoken/Anthropic tokenizers can differ by 10-30%.
+**Impact**: Cost estimates and context window enforcement may be inaccurate.
+**Mitigation**: Use actual token counts from API responses for cost tracking. Consider adding tiktoken as optional dependency.
 
-### 5. Search/Replace Edit Reliability
+### 4. Git Credential Conflict (Development Machine)
+**Severity**: Low (local)
+**Description**: `git push` uses cached credential (`kxgst228`) instead of `GoparapukethaN`. The `gh` CLI auth works correctly. Subsequent pushes need credential manager update or SSH.
+**Workaround**: Use `gh` CLI for pushes, or update git credential keychain.
+
+### 5. Keyring Platform Variability
 **Severity**: Medium
-**Description**: The search/replace edit format requires models to produce exact string matches for the search portion. Smaller models (Ollama 7B) may produce approximate matches that fail.
-**Impact**: Edit operations fail, requiring manual intervention or retry with a better model.
-**Mitigation**: Implement fuzzy matching fallback: if exact match fails, try normalized whitespace matching and suggest the closest match to the user.
-**Status**: To be addressed in Phase 1 Month 3
-
-### 6. tree-sitter Language Coverage
-**Severity**: Low
-**Description**: Not all programming languages have mature tree-sitter grammars. Some files (configs, data formats) won't be parseable.
-**Impact**: Repo map may be incomplete for projects using niche languages.
-**Mitigation**: Graceful fallback: show file path and first few lines for unparseable files.
-**Status**: To be addressed in Phase 1 Month 3
-
-### 7. Keyring Compatibility
-**Severity**: Medium
-**Description**: `keyring` library has inconsistent behavior across platforms. Headless Linux (no GUI) may not have a keyring backend. Docker containers lack keyring. WSL may have limited support.
+**Description**: `keyring` has inconsistent behavior across platforms. Headless Linux, Docker, and WSL may lack backends.
 **Impact**: Credential storage fails on some platforms.
-**Mitigation**: Three-tier fallback: keyring → env vars → encrypted file. Clear error messages suggesting alternatives when keyring fails.
-**Status**: To be addressed in Phase 1
+**Mitigation**: Already implemented: 3-tier fallback (keyring → env vars → encrypted file). Clear error messages suggest alternatives.
 
-### 8. Context Window Limits with Multiple Active Files
+### 6. LiteLLM Model ID Drift
 **Severity**: Medium
-**Description**: When users `/add` many large files, the context may exceed the model's window, especially for smaller models (Ollama 32K, DeepSeek 64K).
-**Impact**: API calls fail or responses are truncated.
-**Mitigation**: Context budget enforcement — measure tokens before sending, auto-truncate or auto-compact, route to larger-context models when needed.
-**Status**: To be addressed in Phase 2
+**Description**: LiteLLM frequently updates model identifiers. IDs in `provider_config.py` and `base.py` may become stale.
+**Impact**: Provider configs may break on LiteLLM updates.
+**Mitigation**: Pin LiteLLM version, verify IDs during live testing.
 
-### 9. Concurrent Session Conflicts
+### 7. Playwright Install Size
 **Severity**: Low
-**Description**: Running multiple Prism sessions in the same project could cause SQLite WAL conflicts or git commit race conditions.
-**Impact**: Database errors or conflicting git commits.
-**Mitigation**: File-based lock per project root. Warning if another session detected.
-**Status**: To be addressed in Phase 2
+**Description**: Playwright downloads ~400MB of Chromium. Not included by default.
+**Impact**: Long install for `[web]` extra.
+**Mitigation**: By design — `pip install prism-cli[web]` is optional. httpx path available for basic browsing.
 
-### 10. Playwright Installation Size
+### 8. encrypted_store.py Low Coverage (30%)
 **Severity**: Low
-**Description**: Playwright downloads ~400MB of Chromium binaries. This significantly increases install size for the `[web]` extra.
-**Impact**: Long install times, disk space usage.
-**Mitigation**: Web browsing is an optional extra (`pip install prism-cli[web]`). Not included by default. Fast httpx path available for most documentation lookups.
-**Status**: By design — optional dependency
+**Description**: `cryptography` is an optional dependency. Most encrypted store paths are untested because the dep isn't installed in the test environment.
+**Impact**: Encrypted credential storage may have untested edge cases.
+**Mitigation**: Add `cryptography` to dev dependencies and write tests in a future pass.
 
-## Issue Tracking
+### 9. Classifier Threshold Sensitivity
+**Severity**: Medium
+**Description**: `medium_threshold` was lowered from 0.7 to 0.55 because the original was unreachable for text-only prompts without file context. Thresholds may need further tuning with real usage data.
+**Impact**: Tasks may be misclassified, routing to wrong model tiers.
+**Mitigation**: Adaptive learning module adjusts over time after 100+ interactions.
 
-When new issues are discovered during development:
-1. Add to this file with severity, description, impact, mitigation, and status
-2. If critical: create a GitHub issue
-3. Update status as work progresses
-4. Remove from this file when resolved (move to CHANGELOG.md)
+### 10. No CI/CD Pipeline
+**Severity**: Medium
+**Description**: No GitHub Actions, no automated testing on push.
+**Impact**: Regressions may be merged without detection.
+**Next Step**: Set up CI with pytest + ruff + bandit in a future phase.
+
+## Resolved Issues
+
+| Issue | Resolution | Version |
+|-------|-----------|---------|
+| Transaction rollback on Ctrl+C | Changed `except Exception` to `except BaseException` in `database.py` | v0.1.0-alpha |
+| SecretFilter missed API keys in values | Added `scrub_value()` with regex patterns for value-level scrubbing | v0.1.0-alpha |
+| Sensitive env patterns too narrow | Broadened from `*_API_KEY` to `*API_KEY*` | v0.1.0-alpha |

@@ -64,12 +64,19 @@
 | Rate limiter | DONE | Sliding window per-provider |
 | Adaptive learning | DONE | EWMA, exploration, feedback loop |
 
+## Release
+- **Tag**: v0.1.0-alpha
+- **GitHub**: https://github.com/GoparapukethaN/prism-cli
+- **Commit**: 0a2764e (224 files, 46,759 lines)
+
 ## Completion Metrics
 - Modules completed: 25 / 25
-- Tests written: 1,503 passing, 15 skipped
-- Test files: 45+ test suites
-- Source code: ~13,600+ lines (13,628 scanned by bandit)
-- Test code: ~9,000+ lines
+- Tests: 1,521 passing, 15 skipped
+- Test suites: 45+
+- Source code: 17,734 lines (118 .py files)
+- Test code: 19,790 lines (106 .py files)
+- Total files: 224
 - Ruff: 0 errors
-- Bandit: All findings reviewed and expected (subprocess, urlopen for CLI tool)
+- Bandit: Clean
 - Code coverage: 91% (target: 90% — ACHIEVED)
+- Security: No real API keys in codebase, .gitignore verified
