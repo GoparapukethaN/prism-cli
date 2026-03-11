@@ -499,6 +499,169 @@ def ask(
     console.print("[yellow]Single-shot mode not yet implemented. Use interactive REPL.[/]")
 
 
+@app.command("architect")
+def architect_command(
+    goal: str = typer.Argument(
+        default="",
+        help="Goal description for the architect to plan and execute.",
+    ),
+    resume: str | None = typer.Option(
+        None, "--resume",
+        help="Resume a paused plan by ID.",
+    ),
+    list_plans: bool = typer.Option(
+        False, "--list",
+        help="List all plans.",
+    ),
+    status: str | None = typer.Option(
+        None, "--status",
+        help="Show plan status by ID.",
+    ),
+    rollback: str | None = typer.Option(
+        None, "--rollback",
+        help="Rollback a plan by ID.",
+    ),
+    root: Path | None = typer.Option(
+        None, "--root", "-r",
+        help="Project root directory.",
+        exists=True,
+        file_okay=False,
+        resolve_path=True,
+    ),
+) -> None:
+    """Plan and execute complex multi-step tasks with architect mode."""
+    import asyncio
+
+    from prism.config.settings import load_settings
+
+    settings = load_settings(project_root=root)
+    settings.ensure_directories()
+
+    from prism.architect.display import (
+        display_execution_summary,
+        display_plan_list,
+        display_plan_review,
+        display_rollback_result,
+    )
+    from prism.architect.executor import ArchitectExecutor
+    from prism.architect.planner import ArchitectPlanner
+    from prism.architect.storage import PlanStorage
+    from prism.cost.tracker import CostTracker
+    from prism.db.database import Database
+
+    try:
+        db = Database(settings.db_path)
+        tracker = CostTracker(db=db, settings=settings)
+
+        # --- list ---
+        if list_plans:
+            storage = PlanStorage(db)
+            plans = storage.list_plans()
+            display_plan_list(plans, console)
+            return
+
+        # --- status ---
+        if status is not None:
+            storage = PlanStorage(db)
+            plan = storage.load_plan(status)
+            if plan is None:
+                console.print(
+                    f"[yellow]Plan not found:[/] {status}"
+                )
+                raise typer.Exit(1)
+            display_plan_review(plan, console)
+            return
+
+        # --- resume ---
+        if resume is not None:
+            storage = PlanStorage(db)
+            plan = storage.load_plan(resume)
+            if plan is None:
+                console.print(
+                    f"[yellow]Plan not found:[/] {resume}"
+                )
+                raise typer.Exit(1)
+            executor = ArchitectExecutor(
+                settings=settings,
+                cost_tracker=tracker,
+            )
+            summary = asyncio.get_event_loop(
+            ).run_until_complete(
+                executor.resume(plan, storage=storage)
+            )
+            display_execution_summary(summary, console)
+            storage.save_plan(plan)
+            return
+
+        # --- rollback ---
+        if rollback is not None:
+            storage = PlanStorage(db)
+            plan = storage.load_plan(rollback)
+            if plan is None:
+                console.print(
+                    f"[yellow]Plan not found:[/] {rollback}"
+                )
+                raise typer.Exit(1)
+            executor = ArchitectExecutor(
+                settings=settings,
+                cost_tracker=tracker,
+            )
+            success, description = executor.rollback(plan)
+            display_rollback_result(
+                success, console, description=description,
+            )
+            storage.save_plan(plan)
+            return
+
+        # --- create + execute (default) ---
+        if not goal.strip():
+            console.print(
+                "[yellow]Usage:[/] prism architect <goal>\n"
+                "[dim]Options: --list, --status <id>, "
+                "--resume <id>, --rollback <id>[/dim]"
+            )
+            raise typer.Exit(1)
+
+        planner = ArchitectPlanner(
+            settings=settings,
+            cost_tracker=tracker,
+        )
+        plan = planner.create_plan(goal)
+        display_plan_review(plan, console)
+
+        # Auto-approve and execute
+        plan.status = "approved"
+        console.print(
+            "[green]Plan auto-approved. Executing...[/green]"
+        )
+
+        executor = ArchitectExecutor(
+            settings=settings,
+            cost_tracker=tracker,
+        )
+        summary = asyncio.get_event_loop(
+        ).run_until_complete(
+            executor.execute_plan(plan)
+        )
+        display_execution_summary(summary, console)
+
+        # Persist plan
+        storage = PlanStorage(db)
+        storage.save_plan(plan)
+        console.print(
+            f"[dim]Plan {plan.id[:12]}... saved.[/dim]"
+        )
+
+    except typer.Exit:
+        raise
+    except ValueError as exc:
+        console.print(f"[yellow]{exc}[/]")
+        raise typer.Exit(1) from exc
+    except Exception as exc:
+        console.print(f"[red]Architect error:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+
 @app.command("init")
 def init_project(
     root: Path | None = typer.Option(None, "--root", "-r"),

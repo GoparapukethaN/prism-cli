@@ -374,7 +374,8 @@ class TestRollback:
         """Rollback without a checkpoint should return False."""
         executor = ArchitectExecutor(mock_settings, mock_cost_tracker)
         sample_plan.git_checkpoint = None
-        assert executor.rollback(sample_plan) is False
+        success, _desc = executor.rollback(sample_plan)
+        assert success is False
 
     def test_rollback_no_git_repo(
         self, mock_settings, mock_cost_tracker, sample_plan
@@ -382,7 +383,8 @@ class TestRollback:
         """Rollback without a git repo should return False."""
         executor = ArchitectExecutor(mock_settings, mock_cost_tracker)
         sample_plan.git_checkpoint = "abc123"
-        assert executor.rollback(sample_plan) is False
+        success, _desc = executor.rollback(sample_plan)
+        assert success is False
 
     def test_rollback_success(
         self, mock_settings, mock_cost_tracker, mock_git_repo, failed_plan
@@ -397,9 +399,10 @@ class TestRollback:
         mock_result.stderr = ""
 
         with patch("prism.architect.executor.subprocess.run", return_value=mock_result):
-            result = executor.rollback(failed_plan)
+            success, desc = executor.rollback(failed_plan)
 
-        assert result is True
+        assert success is True
+        assert desc  # Description should be non-empty
         assert failed_plan.status == "rolled_back"
 
 

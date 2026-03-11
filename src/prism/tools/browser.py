@@ -15,10 +15,12 @@ Security:
 from __future__ import annotations
 
 import base64
+import contextlib
 import html
 import ipaddress
 import random
 import re
+import threading
 import time as _time
 from typing import Any
 from urllib.parse import urlparse
@@ -36,8 +38,68 @@ _STRIP_TAGS_RE = re.compile(
     r"[\s>].*?</\1>",
     re.DOTALL | re.IGNORECASE,
 )
+
+# Cookie banners, consent dialogs, GDPR overlays.
+_COOKIE_BANNER_RE = re.compile(
+    r"<[^>]+(?:class|id)=[\"'][^\"']*"
+    r"(?:cookie|consent|gdpr)[^\"']*[\"'][^>]*>.*?</(?:div|section|aside)>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Hidden elements (display:none or visibility:hidden).
+_HIDDEN_ELEMENT_RE = re.compile(
+    r"<[^>]+style=[\"'][^\"']*"
+    r"(?:display\s*:\s*none|visibility\s*:\s*hidden)"
+    r"[^\"']*[\"'][^>]*>.*?</[^>]+>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Code block patterns for preservation.
+_CODE_BLOCK_RE = re.compile(
+    r"<pre[^>]*>\s*<code(?:\s+class=[\"']"
+    r"(?:language-)?(\w+)[\"'])?[^>]*>(.*?)</code>\s*</pre>",
+    re.DOTALL | re.IGNORECASE,
+)
+_INLINE_CODE_RE = re.compile(
+    r"<code[^>]*>(.*?)</code>",
+    re.DOTALL | re.IGNORECASE,
+)
+
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WHITESPACE_RE = re.compile(r"\n{3,}")
+
+# ------------------------------------------------------------------
+# URL result cache (10-minute TTL)
+# ------------------------------------------------------------------
+_URL_CACHE: dict[str, tuple[float, ToolResult]] = {}
+_CACHE_TTL = 600  # 10 minutes
+
+
+def _get_cached(url: str) -> ToolResult | None:
+    """Return cached result for *url* if still valid.
+
+    Args:
+        url: The URL to look up.
+
+    Returns:
+        Cached ToolResult or None if not found / expired.
+    """
+    if url in _URL_CACHE:
+        ts, result = _URL_CACHE[url]
+        if _time.time() - ts < _CACHE_TTL:
+            return result
+        del _URL_CACHE[url]
+    return None
+
+
+def _set_cached(url: str, result: ToolResult) -> None:
+    """Store a successful fetch result in the cache.
+
+    Args:
+        url: The URL that was fetched.
+        result: The ToolResult to cache.
+    """
+    _URL_CACHE[url] = (_time.time(), result)
 
 
 def _get_sync_playwright() -> Any:
@@ -55,19 +117,41 @@ def _get_sync_playwright() -> Any:
 _LOCALHOST_ALLOWED_PORTS: frozenset[int] = frozenset({11434})  # Ollama
 
 # Private IP ranges.
-_PRIVATE_PREFIXES = ("10.", "172.16.", "172.17.", "172.18.", "172.19.",
-                     "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
-                     "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
-                     "172.30.", "172.31.", "192.168.", "169.254.")
+_PRIVATE_PREFIXES = (
+    "10.", "172.16.", "172.17.", "172.18.", "172.19.",
+    "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
+    "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
+    "172.30.", "172.31.", "192.168.", "169.254.",
+)
 
 _USER_AGENTS: list[str] = [
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) "
+    "AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/605.1.15 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) "
+    "Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:123.0) "
+    "Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:123.0) "
+    "Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 Edge/122.0.0.0 Safari/537.36",
 ]
+
+# ------------------------------------------------------------------
+# Concurrency limiter (threading-based for sync execute())
+# ------------------------------------------------------------------
+_MAX_CONCURRENT = 10
+_SEMAPHORE = threading.Semaphore(_MAX_CONCURRENT)
 
 
 class DomainRateLimiter:
@@ -81,13 +165,13 @@ class DomainRateLimiter:
         """Initialize the rate limiter.
 
         Args:
-            min_delay: Minimum seconds between requests to the same domain.
+            min_delay: Minimum seconds between requests to same domain.
         """
         self._min_delay = min_delay
         self._last_request: dict[str, float] = {}
 
     def wait_if_needed(self, url: str) -> None:
-        """Block until it's safe to make a request to the URL's domain.
+        """Block until it's safe to request the URL's domain.
 
         Args:
             url: The target URL.
@@ -127,9 +211,15 @@ _RATE_LIMITER = DomainRateLimiter(min_delay=2.0)
 class BrowseWebTool(Tool):
     """Browse a URL and extract content.
 
-    Uses httpx for simple fetches, Playwright for JavaScript-heavy pages.
+    Uses httpx for simple fetches, Playwright for JS-heavy pages.
     Playwright is lazy-loaded (only imported when actually needed).
+    Each instance maintains its own URL result cache with a
+    10-minute TTL.
     """
+
+    def __init__(self) -> None:
+        """Initialize the tool with an empty URL cache."""
+        self._cache: dict[str, tuple[float, ToolResult]] = {}
 
     @property
     def name(self) -> str:
@@ -153,12 +243,18 @@ class BrowseWebTool(Tool):
                 },
                 "extract_text": {
                     "type": "boolean",
-                    "description": "Extract readable text from HTML (default true).",
+                    "description": (
+                        "Extract readable text from HTML "
+                        "(default true)."
+                    ),
                     "default": True,
                 },
                 "screenshot": {
                     "type": "boolean",
-                    "description": "Capture a screenshot (requires Playwright).",
+                    "description": (
+                        "Capture a screenshot "
+                        "(requires Playwright)."
+                    ),
                     "default": False,
                 },
                 "timeout": {
@@ -168,7 +264,9 @@ class BrowseWebTool(Tool):
                 },
                 "use_browser": {
                     "type": "boolean",
-                    "description": "Use Playwright instead of httpx.",
+                    "description": (
+                        "Use Playwright instead of httpx."
+                    ),
                     "default": False,
                 },
             },
@@ -187,8 +285,9 @@ class BrowseWebTool(Tool):
         """Fetch a URL and return extracted content.
 
         Args:
-            arguments: Must contain ``url``; optional ``extract_text``,
-                       ``screenshot``, ``timeout``, ``use_browser``.
+            arguments: Must contain ``url``; optional
+                ``extract_text``, ``screenshot``, ``timeout``,
+                ``use_browser``.
         """
         validated = self.validate_arguments(arguments)
 
@@ -202,23 +301,79 @@ class BrowseWebTool(Tool):
             return ToolResult(
                 success=False,
                 output="",
-                error=f"URL rejected by security policy: {url}",
+                error=(
+                    f"URL rejected by security policy: {url}"
+                ),
             )
 
-        if use_browser or screenshot:
-            return self._fetch_with_playwright(
-                url, timeout=timeout, screenshot=screenshot
-            )
-        return self._fetch_with_httpx(
-            url, timeout=timeout, extract_text=extract_text
-        )
+        # Check instance cache (skip for screenshot requests)
+        if not screenshot:
+            cached = self._get_cached(url)
+            if cached is not None:
+                logger.debug("cache_hit", url=url)
+                return cached
+
+        with _SEMAPHORE:
+            if use_browser or screenshot:
+                result = self._fetch_with_playwright(
+                    url,
+                    timeout=timeout,
+                    screenshot=screenshot,
+                )
+            else:
+                result = self._fetch_with_httpx(
+                    url,
+                    timeout=timeout,
+                    extract_text=extract_text,
+                )
+
+        # Cache successful results (skip screenshots)
+        if result.success and not screenshot:
+            self._set_cached(url, result)
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Instance-level URL cache
+    # ------------------------------------------------------------------
+
+    def _get_cached(self, url: str) -> ToolResult | None:
+        """Return cached result for *url* if still valid.
+
+        Args:
+            url: The URL to look up.
+
+        Returns:
+            Cached ToolResult or None if not found / expired.
+        """
+        if url in self._cache:
+            ts, result = self._cache[url]
+            if _time.time() - ts < _CACHE_TTL:
+                return result
+            del self._cache[url]
+        return None
+
+    def _set_cached(
+        self, url: str, result: ToolResult
+    ) -> None:
+        """Store a successful result in instance cache.
+
+        Args:
+            url: The URL that was fetched.
+            result: The ToolResult to cache.
+        """
+        self._cache[url] = (_time.time(), result)
 
     # ------------------------------------------------------------------
     # Fetchers
     # ------------------------------------------------------------------
 
     def _fetch_with_httpx(
-        self, url: str, *, timeout: int, extract_text: bool = True
+        self,
+        url: str,
+        *,
+        timeout: int,
+        extract_text: bool = True,
     ) -> ToolResult:
         """Lightweight fetch using httpx."""
         try:
@@ -232,7 +387,9 @@ class BrowseWebTool(Tool):
                 response = client.get(url)
                 response.raise_for_status()
 
-            content_type = response.headers.get("content-type", "")
+            content_type = response.headers.get(
+                "content-type", ""
+            )
             raw_text = response.text
 
             if extract_text and "html" in content_type.lower():
@@ -253,13 +410,17 @@ class BrowseWebTool(Tool):
             return ToolResult(
                 success=False,
                 output="",
-                error=f"Request timed out after {timeout}s: {url}",
+                error=(
+                    f"Request timed out after {timeout}s: {url}"
+                ),
             )
         except httpx.HTTPStatusError as exc:
             return ToolResult(
                 success=False,
                 output="",
-                error=f"HTTP {exc.response.status_code}: {url}",
+                error=(
+                    f"HTTP {exc.response.status_code}: {url}"
+                ),
             )
         except Exception as exc:
             return ToolResult(
@@ -280,7 +441,8 @@ class BrowseWebTool(Tool):
                 output="",
                 error=(
                     "Playwright is not installed. "
-                    "Install with: pip install playwright && playwright install chromium"
+                    "Install with: pip install playwright "
+                    "&& playwright install chromium"
                 ),
             )
 
@@ -291,6 +453,15 @@ class BrowseWebTool(Tool):
                 page = browser.new_page()
                 page.goto(url, timeout=timeout * 1000)
 
+                # Auto-dismiss popups / modals / overlays
+                with contextlib.suppress(Exception):
+                    page.evaluate(
+                        "document.querySelectorAll("
+                        "'[class*=modal], [class*=popup], "
+                        "[class*=overlay]'"
+                        ").forEach(e => e.remove())"
+                    )
+
                 content = page.content()
                 extracted = self._extract_content(content)
 
@@ -298,10 +469,14 @@ class BrowseWebTool(Tool):
                 output = extracted
 
                 if screenshot:
-                    screenshot_bytes = page.screenshot(full_page=True)
-                    result_meta["screenshot_base64"] = base64.b64encode(
-                        screenshot_bytes
-                    ).decode("utf-8")
+                    screenshot_bytes = page.screenshot(
+                        full_page=True
+                    )
+                    result_meta["screenshot_base64"] = (
+                        base64.b64encode(
+                            screenshot_bytes
+                        ).decode("utf-8")
+                    )
 
                 browser.close()
 
@@ -324,11 +499,44 @@ class BrowseWebTool(Tool):
     def _extract_content(self, raw_html: str) -> str:
         """Extract readable text from HTML.
 
-        Removes script, style, nav, footer, header, aside, noscript,
-        iframe, and SVG elements, then strips remaining tags and collapses
-        excessive whitespace.
+        Removes script, style, nav, footer, header, aside,
+        noscript, iframe, SVG elements, cookie banners, consent
+        dialogs, and hidden elements. Preserves code blocks with
+        language detection, then strips remaining tags and
+        collapses excessive whitespace into clean markdown.
         """
         text = _STRIP_TAGS_RE.sub("", raw_html)
+
+        # Remove cookie banners / consent / GDPR overlays
+        text = _COOKIE_BANNER_RE.sub("", text)
+
+        # Remove hidden elements
+        text = _HIDDEN_ELEMENT_RE.sub("", text)
+
+        # Preserve code blocks with language detection
+        def _replace_code_block(match: re.Match[str]) -> str:
+            lang = match.group(1) or ""
+            code = match.group(2)
+            code = re.sub(r"<[^>]+>", "", code)
+            code = html.unescape(code)
+            return f"\n```{lang}\n{code}\n```\n"
+
+        text = _CODE_BLOCK_RE.sub(_replace_code_block, text)
+
+        # Preserve inline code
+        def _replace_inline_code(
+            match: re.Match[str],
+        ) -> str:
+            code = match.group(1)
+            code = re.sub(r"<[^>]+>", "", code)
+            code = html.unescape(code)
+            return f"`{code}`"
+
+        text = _INLINE_CODE_RE.sub(
+            _replace_inline_code, text
+        )
+
+        # Strip remaining HTML tags
         text = _HTML_TAG_RE.sub(" ", text)
         text = html.unescape(text)
         text = _WHITESPACE_RE.sub("\n\n", text)
@@ -337,11 +545,14 @@ class BrowseWebTool(Tool):
         return text
 
     @staticmethod
-    def _truncate_content(text: str, max_tokens: int = 8000) -> str:
-        """Intelligently truncate content to fit within a token budget.
+    def _truncate_content(
+        text: str, max_tokens: int = 8000
+    ) -> str:
+        """Intelligently truncate content to fit token budget.
 
-        Preserves the beginning and end of content, removing the middle
-        if truncation is needed. Uses approximate token estimation.
+        Preserves the beginning and end of content, removing the
+        middle if truncation is needed. Uses approximate token
+        estimation.
 
         Args:
             text: The text to truncate.
@@ -361,19 +572,24 @@ class BrowseWebTool(Tool):
 
         # Keep first 70% and last 30% of the budget
         head_budget = int(max_chars * 0.7)
-        tail_budget = max_chars - head_budget - 50  # 50 chars for indicator
+        tail_budget = max_chars - head_budget - 50
 
         head = text[:head_budget]
         tail = text[-tail_budget:] if tail_budget > 0 else ""
 
-        return f"{head}\n\n[... content truncated ({len(text)} chars total) ...]\n\n{tail}"
+        return (
+            f"{head}\n\n"
+            f"[... content truncated "
+            f"({len(text)} chars total) ...]\n\n"
+            f"{tail}"
+        )
 
     # ------------------------------------------------------------------
     # URL safety
     # ------------------------------------------------------------------
 
     def _is_safe_url(self, url: str) -> bool:
-        """Reject ``file://``, localhost (except Ollama), and private IPs."""
+        """Reject file://, localhost (except Ollama), private IPs."""
         try:
             parsed = urlparse(url)
         except Exception:
@@ -386,9 +602,14 @@ class BrowseWebTool(Tool):
         hostname = parsed.hostname or ""
 
         # Localhost check
-        if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        if hostname in (
+            "localhost", "127.0.0.1", "::1", "0.0.0.0",
+        ):
             port = parsed.port
-            return bool(port is not None and port in _LOCALHOST_ALLOWED_PORTS)
+            return bool(
+                port is not None
+                and port in _LOCALHOST_ALLOWED_PORTS
+            )
 
         # Private IP check
         try:
@@ -396,7 +617,7 @@ class BrowseWebTool(Tool):
             if ip.is_private or ip.is_reserved or ip.is_loopback:
                 return False
         except ValueError:
-            # Not an IP address -- check hostname heuristics
+            # Not an IP -- check hostname heuristics
             for prefix in _PRIVATE_PREFIXES:
                 if hostname.startswith(prefix):
                     return False

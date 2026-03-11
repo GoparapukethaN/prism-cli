@@ -73,6 +73,14 @@ COMMAND_CATEGORIES: dict[str, list[tuple[str, str]]] = {
         ("/debug-memory [search] [query]", "Debug memory search"),
         ("/history <file>", "Code archaeology — file evolution"),
     ],
+    "Planning": [
+        ("/architect <goal>",
+         "Plan and execute complex multi-step tasks"),
+        ("/architect list", "List all plans"),
+        ("/architect resume [id]", "Resume a paused plan"),
+        ("/architect status [id]", "Show plan status"),
+        ("/architect rollback [id]", "Rollback a plan"),
+    ],
     "Infrastructure": [
         ("/undo", "Undo last file change"),
         ("/rollback [list|undo|restore] [id]",
@@ -263,6 +271,7 @@ def _dispatch_command(
         "/debug-memory": _cmd_debug_memory,
         "/history": _cmd_history,
         "/budget": _cmd_budget,
+        "/architect": _cmd_architect,
     }
 
     handler = dispatch.get(cmd)
@@ -2112,6 +2121,165 @@ def _cmd_budget(
     except Exception as exc:
         logger.debug("budget_error", error=str(exc))
         console.print(f"[red]Budget error:[/] {exc}")
+    return "continue"
+
+
+def _cmd_architect(
+    args: str,
+    console: Console,
+    settings: Settings,
+    state: _SessionState,
+    **_: Any,
+) -> str:
+    """Plan and execute complex multi-step tasks."""
+    try:
+        from prism.architect.display import (
+            display_execution_summary,
+            display_plan_list,
+            display_plan_review,
+            display_rollback_result,
+        )
+        from prism.architect.executor import (
+            ArchitectExecutor,
+        )
+        from prism.architect.planner import ArchitectPlanner
+        from prism.architect.storage import PlanStorage
+        from prism.cost.tracker import CostTracker
+        from prism.db.database import Database
+
+        db = Database(settings.db_path)
+        tracker = CostTracker(db=db, settings=settings)
+
+        parts = args.split(maxsplit=1)
+        sub = parts[0].lower() if parts else ""
+        extra = parts[1].strip() if len(parts) > 1 else ""
+
+        # --- /architect list ---
+        if sub == "list":
+            storage = PlanStorage(db)
+            plans = storage.list_plans()
+            display_plan_list(plans, console)
+            return "continue"
+
+        # --- /architect status [plan_id] ---
+        if sub == "status":
+            if not extra:
+                console.print(
+                    "[yellow]Usage:[/] "
+                    "/architect status <plan-id>"
+                )
+                return "continue"
+            storage = PlanStorage(db)
+            plan = storage.load_plan(extra)
+            if plan is None:
+                console.print(
+                    f"[yellow]Plan not found:[/] {extra}"
+                )
+                return "continue"
+            display_plan_review(plan, console)
+            return "continue"
+
+        # --- /architect resume [plan_id] ---
+        if sub == "resume":
+            if not extra:
+                console.print(
+                    "[yellow]Usage:[/] "
+                    "/architect resume <plan-id>"
+                )
+                return "continue"
+            storage = PlanStorage(db)
+            plan = storage.load_plan(extra)
+            if plan is None:
+                console.print(
+                    f"[yellow]Plan not found:[/] {extra}"
+                )
+                return "continue"
+
+            executor = ArchitectExecutor(
+                settings=settings,
+                cost_tracker=tracker,
+            )
+            summary = asyncio.get_event_loop(
+            ).run_until_complete(
+                executor.resume(plan, storage=storage)
+            )
+            display_execution_summary(summary, console)
+            storage.save_plan(plan)
+            return "continue"
+
+        # --- /architect rollback [plan_id] ---
+        if sub == "rollback":
+            if not extra:
+                console.print(
+                    "[yellow]Usage:[/] "
+                    "/architect rollback <plan-id>"
+                )
+                return "continue"
+            storage = PlanStorage(db)
+            plan = storage.load_plan(extra)
+            if plan is None:
+                console.print(
+                    f"[yellow]Plan not found:[/] {extra}"
+                )
+                return "continue"
+
+            executor = ArchitectExecutor(
+                settings=settings,
+                cost_tracker=tracker,
+            )
+            success, description = executor.rollback(plan)
+            display_rollback_result(
+                success, console, description=description,
+            )
+            storage.save_plan(plan)
+            return "continue"
+
+        # --- /architect <goal> (default: create + execute) ---
+        if not args.strip():
+            console.print(
+                "[yellow]Usage:[/] /architect <goal>\n"
+                "[dim]Subcommands: list, status, "
+                "resume, rollback[/dim]"
+            )
+            return "continue"
+
+        goal = args.strip()
+        planner = ArchitectPlanner(
+            settings=settings,
+            cost_tracker=tracker,
+        )
+        plan = planner.create_plan(goal)
+        display_plan_review(plan, console)
+
+        # Auto-approve and execute
+        plan.status = "approved"
+        console.print(
+            "[green]Plan auto-approved. "
+            "Executing...[/green]"
+        )
+
+        executor = ArchitectExecutor(
+            settings=settings,
+            cost_tracker=tracker,
+        )
+        summary = asyncio.get_event_loop(
+        ).run_until_complete(
+            executor.execute_plan(plan)
+        )
+        display_execution_summary(summary, console)
+
+        # Persist plan
+        storage = PlanStorage(db)
+        storage.save_plan(plan)
+        console.print(
+            f"[dim]Plan {plan.id[:12]}... saved.[/dim]"
+        )
+
+    except ValueError as exc:
+        console.print(f"[yellow]{exc}[/]")
+    except Exception as exc:
+        logger.debug("architect_error", error=str(exc))
+        console.print(f"[red]Architect error:[/] {exc}")
     return "continue"
 
 

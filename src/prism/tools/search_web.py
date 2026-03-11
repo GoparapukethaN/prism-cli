@@ -21,6 +21,7 @@ class SearchWebTool(Tool):
 
     Uses the DuckDuckGo HTML endpoint which requires no API key.
     Returns up to 5 results with title, URL, and snippet.
+    Optionally fetches the content of the top result.
     """
 
     @property
@@ -29,7 +30,10 @@ class SearchWebTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Search the web using DuckDuckGo. Returns top 5 results with title, URL, and snippet."
+        return (
+            "Search the web using DuckDuckGo. Returns top 5 "
+            "results with title, URL, and snippet."
+        )
 
     @property
     def parameters_schema(self) -> dict[str, Any]:
@@ -42,8 +46,17 @@ class SearchWebTool(Tool):
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of results (1-10)",
+                    "description": (
+                        "Maximum number of results (1-10)"
+                    ),
                     "default": 5,
+                },
+                "follow_first": {
+                    "type": "boolean",
+                    "description": (
+                        "Fetch content of top result"
+                    ),
+                    "default": False,
                 },
             },
             "required": ["query"],
@@ -57,31 +70,52 @@ class SearchWebTool(Tool):
         """Execute a web search.
 
         Args:
-            arguments: Must contain 'query' string.
+            arguments: Must contain 'query' string. Optional
+                'max_results' (int) and 'follow_first' (bool).
 
         Returns:
             ToolResult with search results formatted as text.
         """
         query = arguments.get("query", "").strip()
         if not query:
-            return ToolResult(success=False, output="", error="Search query is required")
+            return ToolResult(
+                success=False,
+                output="",
+                error="Search query is required",
+            )
 
-        max_results = min(max(1, arguments.get("max_results", 5)), 10)
+        max_results = min(
+            max(1, arguments.get("max_results", 5)), 10
+        )
+        follow_first: bool = arguments.get(
+            "follow_first", False
+        )
 
         try:
             import httpx
         except ImportError:
-            return ToolResult(success=False, output="", error="httpx is required for web search")
+            return ToolResult(
+                success=False,
+                output="",
+                error="httpx is required for web search",
+            )
 
         try:
             import random
 
-            from prism.tools.browser import _RATE_LIMITER, _USER_AGENTS
+            from prism.tools.browser import (
+                _RATE_LIMITER,
+                _USER_AGENTS,
+            )
 
             _RATE_LIMITER.wait_if_needed(_DDG_URL)
-            user_agent = random.choice(_USER_AGENTS)  # noqa: S311
+            user_agent = random.choice(  # noqa: S311
+                _USER_AGENTS
+            )
         except ImportError:
-            user_agent = "Mozilla/5.0 (compatible; Prism/1.0)"
+            user_agent = (
+                "Mozilla/5.0 (compatible; Prism/1.0)"
+            )
 
         try:
             with httpx.Client(
@@ -95,22 +129,43 @@ class SearchWebTool(Tool):
                 )
                 resp.raise_for_status()
 
-            results = self._parse_ddg_html(resp.text, max_results)
+            results = self._parse_ddg_html(
+                resp.text, max_results
+            )
 
             if not results:
                 return ToolResult(
                     success=True,
                     output=f"No results found for: {query}",
-                    metadata={"query": query, "result_count": 0},
+                    metadata={
+                        "query": query,
+                        "result_count": 0,
+                    },
                 )
 
             formatted = self._format_results(query, results)
+
+            # Optionally follow the first result URL
+            if follow_first and results:
+                first_url = results[0].get("url", "")
+                if first_url:
+                    fetched = self._fetch_first_result(
+                        first_url, user_agent
+                    )
+                    if fetched:
+                        formatted += (
+                            "\n--- Content from top "
+                            "result ---\n"
+                            f"{fetched}"
+                        )
+
             return ToolResult(
                 success=True,
                 output=formatted,
                 metadata={
                     "query": query,
                     "result_count": len(results),
+                    "followed_first": follow_first,
                 },
             )
 
@@ -121,7 +176,11 @@ class SearchWebTool(Tool):
                 error=f"Search timed out for: {query}",
             )
         except Exception as exc:
-            logger.warning("search_failed", query=query, error=str(exc))
+            logger.warning(
+                "search_failed",
+                query=query,
+                error=str(exc),
+            )
             return ToolResult(
                 success=False,
                 output="",
@@ -129,7 +188,60 @@ class SearchWebTool(Tool):
             )
 
     @staticmethod
-    def _parse_ddg_html(html_content: str, max_results: int) -> list[dict[str, str]]:
+    def _fetch_first_result(
+        url: str, user_agent: str
+    ) -> str:
+        """Fetch content from the first search result URL.
+
+        Args:
+            url: The URL to fetch.
+            user_agent: User-Agent header value.
+
+        Returns:
+            Extracted text content, or empty string on
+            failure.
+        """
+        try:
+            import httpx as _httpx
+
+            from prism.tools.browser import BrowseWebTool
+
+            checker = BrowseWebTool()
+            if not checker._is_safe_url(url):
+                return ""
+
+            with _httpx.Client(
+                timeout=10.0,
+                follow_redirects=True,
+                headers={"User-Agent": user_agent},
+            ) as client:
+                resp = client.get(url)
+                resp.raise_for_status()
+
+            content_type = resp.headers.get(
+                "content-type", ""
+            )
+            if "html" in content_type.lower():
+                extracted = checker._extract_content(
+                    resp.text
+                )
+            else:
+                extracted = resp.text
+
+            # Truncate to 4000 chars for first-result preview
+            if len(extracted) > 4000:
+                extracted = (
+                    extracted[:4000]
+                    + "\n\n[... truncated ...]"
+                )
+            return extracted
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _parse_ddg_html(
+        html_content: str, max_results: int
+    ) -> list[dict[str, str]]:
         """Parse DuckDuckGo HTML search results.
 
         Args:
@@ -137,25 +249,31 @@ class SearchWebTool(Tool):
             max_results: Maximum results to extract.
 
         Returns:
-            List of dicts with 'title', 'url', 'snippet' keys.
+            List of dicts with 'title', 'url', 'snippet'.
         """
         results: list[dict[str, str]] = []
 
-        # Find result blocks -- DuckDuckGo uses class="result__a" for links
+        # DuckDuckGo uses class="result__a" for links
         link_pattern = re.compile(
-            r'class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+            r'class="result__a"[^>]*href="([^"]*)"'
+            r"[^>]*>(.*?)</a>",
             re.DOTALL | re.IGNORECASE,
         )
         snippet_pattern = re.compile(
-            r'class="result__snippet"[^>]*>(.*?)</(?:a|td|div|span)',
+            r'class="result__snippet"[^>]*>'
+            r"(.*?)</(?:a|td|div|span)",
             re.DOTALL | re.IGNORECASE,
         )
 
         links = link_pattern.findall(html_content)
         snippets = snippet_pattern.findall(html_content)
 
-        for i, (url, title_html) in enumerate(links[:max_results]):
-            title = re.sub(r"<[^>]+>", "", title_html).strip()
+        for i, (url, title_html) in enumerate(
+            links[:max_results]
+        ):
+            title = re.sub(
+                r"<[^>]+>", "", title_html
+            ).strip()
             title = html.unescape(title)
 
             # Clean URL (DuckDuckGo wraps URLs)
@@ -163,13 +281,17 @@ class SearchWebTool(Tool):
             if "uddg=" in url:
                 import urllib.parse
 
-                parsed = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+                parsed = urllib.parse.parse_qs(
+                    urllib.parse.urlparse(url).query
+                )
                 if "uddg" in parsed:
                     clean_url = parsed["uddg"][0]
 
             snippet = ""
             if i < len(snippets):
-                snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip()
+                snippet = re.sub(
+                    r"<[^>]+>", "", snippets[i]
+                ).strip()
                 snippet = html.unescape(snippet)
 
             if title and clean_url:
@@ -182,7 +304,9 @@ class SearchWebTool(Tool):
         return results
 
     @staticmethod
-    def _format_results(query: str, results: list[dict[str, str]]) -> str:
+    def _format_results(
+        query: str, results: list[dict[str, str]]
+    ) -> str:
         """Format search results as readable text.
 
         Args:

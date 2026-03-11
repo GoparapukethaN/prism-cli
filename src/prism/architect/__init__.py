@@ -7,9 +7,13 @@ rollback, and resume.
 
 from prism.architect.display import (
     display_cost_estimate,
+    display_execution_summary,
     display_plan,
+    display_plan_list,
+    display_plan_review,
     display_rollback_result,
     display_step_progress,
+    display_step_validation,
 )
 from prism.architect.executor import (
     ESCALATION_MODELS,
@@ -20,8 +24,12 @@ from prism.architect.executor import (
     StepResult,
 )
 from prism.architect.planner import (
+    RISK_HIGH,
+    RISK_LOW,
+    RISK_MEDIUM,
     ArchitectPlanner,
     Plan,
+    PlanStatus,
     PlanStep,
     StepStatus,
 )
@@ -31,16 +39,24 @@ __all__ = [
     "ESCALATION_MODELS",
     "MAX_STEP_RETRIES",
     "RETRY_STRATEGIES",
+    "RISK_HIGH",
+    "RISK_LOW",
+    "RISK_MEDIUM",
     "ArchitectExecutor",
     "ArchitectPlanner",
     "ExecutionSummary",
     "Plan",
+    "PlanStatus",
     "PlanStep",
     "PlanStorage",
     "StepResult",
     "StepStatus",
     "display_cost_estimate",
+    "display_execution_summary",
     "display_plan",
+    "display_plan_list",
+    "display_plan_review",
     "display_rollback_result",
     "display_step_progress",
+    "display_step_validation",
 ]
