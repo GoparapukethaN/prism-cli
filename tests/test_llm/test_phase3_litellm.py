@@ -69,8 +69,8 @@ class TestKimiModels:
     def test_moonshot_128k_pricing(self) -> None:
         assert "moonshot/moonshot-v1-128k" in EXTENDED_PRICING
         pricing = EXTENDED_PRICING["moonshot/moonshot-v1-128k"]
-        assert pricing.input_cost_per_1m == 0.48
-        assert pricing.output_cost_per_1m == 0.48
+        assert pricing.input_cost_per_1m == 0.80
+        assert pricing.output_cost_per_1m == 2.40
 
 
 class TestPerplexityModels:
@@ -140,19 +140,19 @@ class TestProviderTimeouts:
     """Test per-provider timeout configuration."""
 
     def test_anthropic_timeout(self) -> None:
-        assert PROVIDER_TIMEOUTS["anthropic"] == 120.0
+        assert PROVIDER_TIMEOUTS["anthropic"] == 60.0
 
     def test_groq_fastest(self) -> None:
         assert PROVIDER_TIMEOUTS["groq"] == 30.0
 
     def test_ollama_slowest(self) -> None:
-        assert PROVIDER_TIMEOUTS["ollama"] == 300.0
+        assert PROVIDER_TIMEOUTS["ollama"] == 120.0
 
     def test_default_timeout(self) -> None:
         assert _DEFAULT_TIMEOUT == 60.0
 
     def test_get_provider_timeout_known(self) -> None:
-        assert CompletionEngine.get_provider_timeout("anthropic") == 120.0
+        assert CompletionEngine.get_provider_timeout("anthropic") == 60.0
 
     def test_get_provider_timeout_unknown(self) -> None:
         assert CompletionEngine.get_provider_timeout("unknown_provider") == 60.0
@@ -548,11 +548,15 @@ class TestContextWindows:
             assert info is not None, f"{model_id} not found"
             assert info.context_window == 200_000, f"{model_id}: {info.context_window}"
 
-    def test_gemini_1m(self, mock_registry: ProviderRegistry) -> None:
-        for model_id in ["gemini/gemini-2.5-pro", "gemini/gemini-2.0-flash"]:
-            info = mock_registry.get_model_info(model_id)
-            assert info is not None, f"{model_id} not found"
-            assert info.context_window == 1_000_000, f"{model_id}: {info.context_window}"
+    def test_gemini_2_5_pro_context(self, mock_registry: ProviderRegistry) -> None:
+        info = mock_registry.get_model_info("gemini/gemini-2.5-pro")
+        assert info is not None, "gemini/gemini-2.5-pro not found"
+        assert info.context_window == 2_097_152, f"gemini/gemini-2.5-pro: {info.context_window}"
+
+    def test_gemini_2_0_flash_context(self, mock_registry: ProviderRegistry) -> None:
+        info = mock_registry.get_model_info("gemini/gemini-2.0-flash")
+        assert info is not None, "gemini/gemini-2.0-flash not found"
+        assert info.context_window == 1_048_576, f"gemini/gemini-2.0-flash: {info.context_window}"
 
     def test_gpt4o_128k(self, mock_registry: ProviderRegistry) -> None:
         for model_id in ["gpt-4o", "gpt-4o-mini"]:

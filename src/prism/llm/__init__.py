@@ -1,7 +1,12 @@
 """Prism LLM integration — completion engine, streaming, retry, and mocks."""
 
 from prism.llm.completion import CompletionEngine
-from prism.llm.health import HealthChecker, HealthStatus, ProviderDashboardEntry
+from prism.llm.health import (
+    HealthChecker,
+    HealthCheckResult,
+    HealthStatus,
+    ProviderDashboardEntry,
+)
 from prism.llm.interruption import (
     InterruptAction,
     InterruptionState,
@@ -18,6 +23,7 @@ from prism.llm.validation import ResponseValidator
 __all__ = [
     "CompletionEngine",
     "CompletionResult",
+    "HealthCheckResult",
     "HealthChecker",
     "HealthStatus",
     "InterruptAction",

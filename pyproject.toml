@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "prism-cli"
-version = "0.1.0"
+version = "0.2.0"
 description = "Multi-API Intelligent Router CLI — Claude Code-level capabilities with cost-optimizing routing across every AI provider"
 readme = "README.md"
 license = "Apache-2.0"

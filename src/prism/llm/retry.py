@@ -45,7 +45,7 @@ class RetryPolicy:
 
     max_retries: int = 3
     base_delay: float = 1.0
-    max_delay: float = 60.0
+    max_delay: float = 8.0
     exponential_base: float = 2.0
     retryable_errors: tuple[type[Exception], ...] = field(
         default_factory=lambda: _DEFAULT_RETRYABLE,

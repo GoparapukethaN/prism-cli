@@ -110,8 +110,8 @@ MODEL_PRICING: dict[str, ModelPricing] = {
     ),
     "mistral/codestral-latest": ModelPricing(
         provider="mistral",
-        input_cost_per_1m=0.30,
-        output_cost_per_1m=0.90,
+        input_cost_per_1m=0.20,
+        output_cost_per_1m=0.60,
     ),
     # Tier 3: Free / Local
     "ollama/qwen2.5-coder:7b": ModelPricing(
@@ -278,7 +278,7 @@ def get_provider_for_model(model_id: str) -> str:
         known_prefixes = {
             "gemini", "deepseek", "groq", "mistral", "ollama", "openai",
             "perplexity", "cohere", "together_ai", "fireworks_ai", "moonshot",
-            "qwen",
+            "qwen", "custom",
         }
         if prefix in known_prefixes:
             return prefix

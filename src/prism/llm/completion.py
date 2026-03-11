@@ -42,19 +42,20 @@ _DEFAULT_CONTEXT_WINDOW = 32_768
 
 # Per-provider timeout defaults (seconds)
 PROVIDER_TIMEOUTS: dict[str, float] = {
-    "anthropic": 120.0,
-    "openai": 90.0,
-    "google": 90.0,
-    "deepseek": 120.0,
+    "anthropic": 60.0,
+    "openai": 60.0,
+    "google": 60.0,
+    "deepseek": 90.0,
     "groq": 30.0,
     "mistral": 60.0,
-    "ollama": 300.0,  # Local models can be slow
-    "kimi": 90.0,
-    "perplexity": 60.0,
-    "qwen": 90.0,
+    "ollama": 120.0,
+    "kimi": 60.0,
+    "perplexity": 45.0,
+    "qwen": 60.0,
     "cohere": 60.0,
     "together_ai": 60.0,
     "fireworks_ai": 60.0,
+    "custom": 60.0,
 }
 _DEFAULT_TIMEOUT = 60.0
 

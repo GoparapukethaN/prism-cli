@@ -53,8 +53,8 @@ KIMI_CONFIG = ProviderConfig(
             display_name="Moonshot V1 128K",
             provider="kimi",
             tier=ComplexityTier.COMPLEX,
-            input_cost_per_1m=0.48,
-            output_cost_per_1m=0.48,
+            input_cost_per_1m=0.80,
+            output_cost_per_1m=2.40,
             context_window=128_000,
             supports_tools=True,
             supports_vision=False,
@@ -106,8 +106,8 @@ QWEN_CONFIG = ProviderConfig(
             display_name="Qwen Max",
             provider="qwen",
             tier=ComplexityTier.COMPLEX,
-            input_cost_per_1m=2.40,
-            output_cost_per_1m=9.60,
+            input_cost_per_1m=1.60,
+            output_cost_per_1m=4.80,
             context_window=32_768,
             supports_tools=True,
             supports_vision=False,
@@ -118,8 +118,8 @@ QWEN_CONFIG = ProviderConfig(
             display_name="Qwen Turbo",
             provider="qwen",
             tier=ComplexityTier.SIMPLE,
-            input_cost_per_1m=0.30,
-            output_cost_per_1m=0.60,
+            input_cost_per_1m=0.05,
+            output_cost_per_1m=0.15,
             context_window=131_072,
             supports_tools=True,
             supports_vision=False,
@@ -130,8 +130,8 @@ QWEN_CONFIG = ProviderConfig(
             display_name="Qwen Plus",
             provider="qwen",
             tier=ComplexityTier.MEDIUM,
-            input_cost_per_1m=0.80,
-            output_cost_per_1m=2.00,
+            input_cost_per_1m=0.40,
+            output_cost_per_1m=1.20,
             context_window=131_072,
             supports_tools=True,
             supports_vision=False,
@@ -212,6 +212,27 @@ FIREWORKS_AI_CONFIG = ProviderConfig(
     ],
 )
 
+CUSTOM_CONFIG = ProviderConfig(
+    name="custom",
+    display_name="Custom Endpoint",
+    api_key_env="CUSTOM_API_KEY",
+    api_base=None,  # Set via CUSTOM_API_BASE env var
+    models=[
+        ModelInfo(
+            id="custom/default",
+            display_name="Custom Model",
+            provider="custom",
+            tier=ComplexityTier.MEDIUM,
+            input_cost_per_1m=0.00,
+            output_cost_per_1m=0.00,
+            context_window=32_768,
+            supports_tools=True,
+            supports_vision=False,
+            max_output_tokens=4096,
+        ),
+    ],
+)
+
 # ======================================================================
 # Additional models for existing providers (Gemini 2.5 Flash)
 # ======================================================================
@@ -240,6 +261,7 @@ EXTENDED_PROVIDERS: list[ProviderConfig] = [
     COHERE_CONFIG,
     TOGETHER_AI_CONFIG,
     FIREWORKS_AI_CONFIG,
+    CUSTOM_CONFIG,
 ]
 
 # Additional models to be appended to existing providers
@@ -260,7 +282,7 @@ EXTENDED_PRICING: dict[str, ModelPricing] = {
         provider="kimi", input_cost_per_1m=0.24, output_cost_per_1m=0.24,
     ),
     "moonshot/moonshot-v1-128k": ModelPricing(
-        provider="kimi", input_cost_per_1m=0.48, output_cost_per_1m=0.48,
+        provider="kimi", input_cost_per_1m=0.80, output_cost_per_1m=2.40,
     ),
     # Perplexity
     "perplexity/llama-3.1-sonar-large-128k-online": ModelPricing(
@@ -271,13 +293,13 @@ EXTENDED_PRICING: dict[str, ModelPricing] = {
     ),
     # Qwen
     "qwen/qwen-max": ModelPricing(
-        provider="qwen", input_cost_per_1m=2.40, output_cost_per_1m=9.60,
+        provider="qwen", input_cost_per_1m=1.60, output_cost_per_1m=4.80,
     ),
     "qwen/qwen-turbo": ModelPricing(
-        provider="qwen", input_cost_per_1m=0.30, output_cost_per_1m=0.60,
+        provider="qwen", input_cost_per_1m=0.05, output_cost_per_1m=0.15,
     ),
     "qwen/qwen-plus": ModelPricing(
-        provider="qwen", input_cost_per_1m=0.80, output_cost_per_1m=2.00,
+        provider="qwen", input_cost_per_1m=0.40, output_cost_per_1m=1.20,
     ),
     # Cohere
     "cohere/command-r-plus": ModelPricing(
@@ -298,6 +320,10 @@ EXTENDED_PRICING: dict[str, ModelPricing] = {
     "gemini/gemini-2.5-flash": ModelPricing(
         provider="google", input_cost_per_1m=0.15, output_cost_per_1m=0.60,
         cache_discount=0.25,
+    ),
+    # Custom endpoint
+    "custom/default": ModelPricing(
+        provider="custom", input_cost_per_1m=0.00, output_cost_per_1m=0.00,
     ),
 }
 
