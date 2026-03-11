@@ -48,6 +48,18 @@ KIMI_CONFIG = ProviderConfig(
             supports_vision=False,
             max_output_tokens=4096,
         ),
+        ModelInfo(
+            id="moonshot/moonshot-v1-128k",
+            display_name="Moonshot V1 128K",
+            provider="kimi",
+            tier=ComplexityTier.COMPLEX,
+            input_cost_per_1m=0.48,
+            output_cost_per_1m=0.48,
+            context_window=128_000,
+            supports_tools=True,
+            supports_vision=False,
+            max_output_tokens=4096,
+        ),
     ],
 )
 
@@ -57,25 +69,25 @@ PERPLEXITY_CONFIG = ProviderConfig(
     api_key_env="PERPLEXITY_API_KEY",
     models=[
         ModelInfo(
-            id="perplexity/pplx-70b-online",
-            display_name="PPLX 70B Online",
+            id="perplexity/llama-3.1-sonar-large-128k-online",
+            display_name="Sonar Large 128K Online",
             provider="perplexity",
             tier=ComplexityTier.COMPLEX,
             input_cost_per_1m=1.00,
             output_cost_per_1m=1.00,
-            context_window=4_096,
+            context_window=127_072,
             supports_tools=False,
             supports_vision=False,
             max_output_tokens=4096,
         ),
         ModelInfo(
-            id="perplexity/pplx-sonar-medium",
-            display_name="Sonar Medium",
+            id="perplexity/llama-3.1-sonar-small-128k-online",
+            display_name="Sonar Small 128K Online",
             provider="perplexity",
             tier=ComplexityTier.MEDIUM,
-            input_cost_per_1m=0.60,
-            output_cost_per_1m=0.60,
-            context_window=16_384,
+            input_cost_per_1m=0.20,
+            output_cost_per_1m=0.20,
+            context_window=127_072,
             supports_tools=False,
             supports_vision=False,
             max_output_tokens=4096,
@@ -247,12 +259,15 @@ EXTENDED_PRICING: dict[str, ModelPricing] = {
     "moonshot/moonshot-v1-32k": ModelPricing(
         provider="kimi", input_cost_per_1m=0.24, output_cost_per_1m=0.24,
     ),
+    "moonshot/moonshot-v1-128k": ModelPricing(
+        provider="kimi", input_cost_per_1m=0.48, output_cost_per_1m=0.48,
+    ),
     # Perplexity
-    "perplexity/pplx-70b-online": ModelPricing(
+    "perplexity/llama-3.1-sonar-large-128k-online": ModelPricing(
         provider="perplexity", input_cost_per_1m=1.00, output_cost_per_1m=1.00,
     ),
-    "perplexity/pplx-sonar-medium": ModelPricing(
-        provider="perplexity", input_cost_per_1m=0.60, output_cost_per_1m=0.60,
+    "perplexity/llama-3.1-sonar-small-128k-online": ModelPricing(
+        provider="perplexity", input_cost_per_1m=0.20, output_cost_per_1m=0.20,
     ),
     # Qwen
     "qwen/qwen-max": ModelPricing(

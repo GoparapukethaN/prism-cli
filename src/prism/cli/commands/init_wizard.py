@@ -1,468 +1,657 @@
-"""Interactive setup wizard for first-time Prism users."""
+"""Enhanced init wizard — full system setup with hardware detection and provider configuration.
+
+Detects OS, Python version, available RAM, GPU presence, Ollama status,
+walks through API key setup with validation, creates config files with
+sensible defaults, shows cost comparison, sets budget limits, runs health
+checks, and displays a quick-start summary.
+"""
 
 from __future__ import annotations
 
+import os
 import platform
-import shutil
+import subprocess
 import sys
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from pathlib import Path
 
 import structlog
-import yaml
-from rich.console import Console
-from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
-from rich.table import Table
-
-from prism.auth.validator import KeyValidator
-from prism.cost.pricing import MODEL_PRICING
-from prism.providers.base import BUILTIN_PROVIDERS
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from prism.auth.manager import AuthManager
-    from prism.config.settings import Settings
-    from prism.providers.registry import ProviderRegistry
 
 logger = structlog.get_logger(__name__)
 
 
 @dataclass
-class EnvInfo:
-    """Detected environment information."""
+class SystemInfo:
+    """Detected system information."""
 
     os_name: str
     os_version: str
     python_version: str
-    git_available: bool
-    ollama_available: bool
+    ram_gb: float
+    gpu_detected: bool
+    gpu_name: str
+    cpu_cores: int
+    ollama_installed: bool
+    ollama_models: list[str]
+    docker_installed: bool
 
 
 @dataclass
-class OllamaInfo:
-    """Ollama installation status."""
+class ProviderSetup:
+    """Configuration for a provider during setup."""
 
-    installed: bool
-    running: bool
-    models: list[str] = field(default_factory=list)
+    name: str
+    display_name: str
+    env_var: str
+    is_configured: bool = False
+    is_healthy: bool = False
+    example_cost: str = ""
 
 
 @dataclass
-class InitResult:
-    """Result of running the init wizard."""
+class WizardResult:
+    """Result of the init wizard."""
 
-    configured_providers: list[str]
-    config_path: Path
-    project_config_path: Path | None
-    ollama_available: bool
-    suggested_budget: float | None
+    system_info: SystemInfo
+    providers_configured: list[str]
+    config_path: Path | None = None
+    memory_path: Path | None = None
+    ignore_path: Path | None = None
+    budget_daily: float = 10.0
+    budget_monthly: float = 50.0
+
+
+PROVIDER_CONFIGS: list[ProviderSetup] = [
+    ProviderSetup(
+        "anthropic",
+        "Anthropic (Claude)",
+        "ANTHROPIC_API_KEY",
+        example_cost="$3/1M input, $15/1M output",
+    ),
+    ProviderSetup(
+        "openai",
+        "OpenAI (GPT-4o)",
+        "OPENAI_API_KEY",
+        example_cost="$2.50/1M input, $10/1M output",
+    ),
+    ProviderSetup(
+        "google",
+        "Google AI (Gemini)",
+        "GOOGLE_API_KEY",
+        example_cost="$1.25/1M input, $5/1M output",
+    ),
+    ProviderSetup(
+        "deepseek",
+        "DeepSeek",
+        "DEEPSEEK_API_KEY",
+        example_cost="$0.14/1M input, $0.28/1M output",
+    ),
+    ProviderSetup(
+        "groq",
+        "Groq",
+        "GROQ_API_KEY",
+        example_cost="Free tier available",
+    ),
+    ProviderSetup(
+        "mistral",
+        "Mistral",
+        "MISTRAL_API_KEY",
+        example_cost="$2/1M input, $6/1M output",
+    ),
+    ProviderSetup(
+        "cohere",
+        "Cohere",
+        "COHERE_API_KEY",
+        example_cost="$1/1M input, $2/1M output",
+    ),
+    ProviderSetup(
+        "together_ai",
+        "Together AI",
+        "TOGETHER_API_KEY",
+        example_cost="$0.20/1M tokens",
+    ),
+    ProviderSetup(
+        "fireworks_ai",
+        "Fireworks AI",
+        "FIREWORKS_API_KEY",
+        example_cost="$0.20/1M tokens",
+    ),
+]
+
+RECOMMENDED_OLLAMA_MODELS: dict[str, tuple[str, float]] = {
+    "qwen2.5-coder:7b": ("Fast coding", 4.0),
+    "llama3.1:8b": ("General tasks", 5.0),
+    "deepseek-coder-v2:16b": ("Complex coding", 12.0),
+}
+
+PRISM_MD_TEMPLATE = """# .prism.md — Project Memory
+
+## Project Overview
+<!-- Describe your project here -->
+
+## Key Decisions
+<!-- Record architectural decisions -->
+
+## Conventions
+<!-- Project-specific conventions -->
+"""
+
+PRISMIGNORE_DEFAULTS: list[str] = [
+    "# Environment and secrets",
+    ".env",
+    ".env.*",
+    "*.env",
+    "secrets/",
+    "credentials/",
+    "private/",
+    "",
+    "# Cryptographic keys",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "id_rsa",
+    "id_ed25519",
+    "*.pub",
+    "",
+    "# Cloud credentials",
+    ".aws/",
+    ".ssh/",
+    ".gcloud/",
+    "service-account*.json",
+    "credentials.json",
+    "",
+    "# Dependencies and caches",
+    "node_modules/",
+    "__pycache__/",
+    ".venv/",
+    "venv/",
+    ".tox/",
+    ".nox/",
+    "",
+    "# Logs",
+    "*.log",
+    "*.log.*",
+    "",
+    "# Build artifacts",
+    "dist/",
+    "build/",
+    "*.egg-info/",
+    "",
+    "# IDE",
+    ".idea/",
+    ".vscode/",
+    "*.swp",
+    "*.swo",
+]
 
 
 class InitWizard:
-    """Interactive setup wizard for first-time users.
+    """Enhanced setup wizard for Prism CLI.
 
-    Steps:
-    1. Detect OS and Python version
-    2. Walk through API key setup for each provider
-    3. Validate each key (offline format check only -- no real API calls)
-    4. Detect Ollama installation
-    5. Create ~/.prism/config.yaml with defaults
-    6. Create .prism.yaml in current project if project root detected
-    7. Show cost comparison of configured providers
-    8. Suggest default budget limits
+    Performs system detection, provider configuration, config file creation,
+    and health checks. Can be run interactively (via the CLI ``prism init``
+    command) or programmatically (via :meth:`run`).
     """
 
-    # Providers that require API keys (excludes ollama)
-    _KEY_PROVIDERS: list[str] = [
-        "anthropic",
-        "openai",
-        "google",
-        "deepseek",
-        "groq",
-        "mistral",
-    ]
+    def __init__(self, project_root: Path | None = None) -> None:
+        """Initialise the wizard.
 
-    # Display names for providers
-    _DISPLAY_NAMES: dict[str, str] = {
-        "anthropic": "Anthropic (Claude)",
-        "openai": "OpenAI (GPT-4o, o3)",
-        "google": "Google AI Studio (Gemini)",
-        "deepseek": "DeepSeek",
-        "groq": "Groq (Llama, Mixtral)",
-        "mistral": "Mistral",
-    }
+        Args:
+            project_root: The project directory to configure. Defaults to
+                the current working directory.
+        """
+        self._root = (project_root or Path.cwd()).resolve()
+        self._system_info: SystemInfo | None = None
 
-    def __init__(
-        self,
-        auth_manager: AuthManager,
-        provider_registry: ProviderRegistry | None,
-        settings: Settings,
-        console: Console | None = None,
-    ) -> None:
-        self._auth = auth_manager
-        self._registry = provider_registry
-        self._settings = settings
-        self._console = console or Console()
-        self._validator = KeyValidator()
+    # ------------------------------------------------------------------
+    # System detection
+    # ------------------------------------------------------------------
 
-    def run(self, project_root: Path | None = None) -> InitResult:
-        """Run the full wizard. Returns summary of what was set up."""
-        self._console.print()
-        self._console.print(
-            Panel(
-                "[bold cyan]Prism Setup Wizard[/bold cyan]\n"
-                "[dim]Let's get you configured in a few simple steps.[/dim]",
-                border_style="cyan",
-            )
-        )
-        self._console.print()
+    def detect_system(self) -> SystemInfo:
+        """Detect system hardware and software configuration.
 
-        # Step 1: Detect environment
-        env_info = self._detect_environment()
-        self._display_env_info(env_info)
-
-        # Step 2: Setup providers
-        configured = self._setup_providers()
-
-        # Step 3: Detect Ollama
-        ollama_info = self._detect_ollama()
-        if ollama_info.installed:
-            self._console.print(
-                "[green]Found Ollama[/green] installed on this system."
-            )
-            if ollama_info.running:
-                self._console.print(
-                    f"  Models available: {', '.join(ollama_info.models) or 'none detected'}"
-                )
-            else:
-                self._console.print(
-                    "  [yellow]Ollama is installed but not running.[/] "
-                    "Start it with: [cyan]ollama serve[/]"
-                )
-        else:
-            self._console.print(
-                "[dim]Ollama not found.[/] Install it from https://ollama.com "
-                "for free local models."
-            )
-        self._console.print()
-
-        # Step 4: Create config files
-        effective_root = project_root or self._settings.project_root
-        config_path = self._create_config(configured)
-
-        project_config_path: Path | None = None
-        if effective_root and effective_root.is_dir():
-            project_config_path = self._create_project_config(effective_root)
-
-        # Step 5: Show cost comparison
-        if configured:
-            self._show_cost_comparison(configured)
-
-        # Step 6: Suggest budget
-        suggested_budget = self._suggest_budget(configured)
-
-        self._console.print()
-        self._console.print(
-            Panel(
-                "[bold green]Setup complete![/bold green]\n"
-                f"Configured providers: {', '.join(configured) or 'none'}\n"
-                f"Config: {config_path}\n"
-                "[dim]Run [cyan]prism[/cyan] to start using Prism.[/dim]",
-                border_style="green",
-            )
-        )
-
-        return InitResult(
-            configured_providers=configured,
-            config_path=config_path,
-            project_config_path=project_config_path,
-            ollama_available=ollama_info.installed,
-            suggested_budget=suggested_budget,
-        )
-
-    def _detect_environment(self) -> EnvInfo:
-        """Detect OS, Python version, available tools."""
+        Returns:
+            A :class:`SystemInfo` dataclass populated with detected values.
+        """
         os_name = platform.system()
-        os_version = platform.version()
-        python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-        git_available = shutil.which("git") is not None
-        ollama_available = shutil.which("ollama") is not None
+        os_version = platform.release()
+        python_version = (
+            f"{sys.version_info.major}.{sys.version_info.minor}"
+            f".{sys.version_info.micro}"
+        )
 
-        return EnvInfo(
+        ram_gb = self._detect_ram()
+        gpu_detected, gpu_name = self._detect_gpu()
+        cpu_cores = os.cpu_count() or 1
+        ollama_installed = self._check_ollama_installed()
+        ollama_models = self._get_ollama_models() if ollama_installed else []
+        docker_installed = self._check_docker()
+
+        self._system_info = SystemInfo(
             os_name=os_name,
             os_version=os_version,
             python_version=python_version,
-            git_available=git_available,
-            ollama_available=ollama_available,
+            ram_gb=ram_gb,
+            gpu_detected=gpu_detected,
+            gpu_name=gpu_name,
+            cpu_cores=cpu_cores,
+            ollama_installed=ollama_installed,
+            ollama_models=ollama_models,
+            docker_installed=docker_installed,
         )
-
-    def _display_env_info(self, env: EnvInfo) -> None:
-        """Display detected environment information."""
-        table = Table(show_header=False, box=None, padding=(0, 1))
-        table.add_column("Key", style="bold")
-        table.add_column("Value")
-
-        table.add_row("OS:", f"{env.os_name} ({env.os_version[:40]})")
-        table.add_row("Python:", env.python_version)
-        table.add_row(
-            "Git:",
-            "[green]available[/]" if env.git_available else "[yellow]not found[/]",
+        logger.info(
+            "system_detected",
+            os=os_name,
+            ram_gb=round(ram_gb, 1),
+            gpu=gpu_name or "none",
+            ollama=ollama_installed,
         )
-        table.add_row(
-            "Ollama:",
-            "[green]installed[/]" if env.ollama_available else "[dim]not found[/]",
-        )
+        return self._system_info
 
-        self._console.print(
-            Panel(table, title="[bold]Environment[/bold]", border_style="blue")
-        )
-        self._console.print()
+    # ------------------------------------------------------------------
+    # Provider configuration
+    # ------------------------------------------------------------------
 
-    def _setup_providers(self) -> list[str]:
-        """Walk through each provider, ask for API key, validate format.
+    def check_provider(self, provider: ProviderSetup) -> bool:
+        """Check if a provider API key is configured in the environment.
+
+        Args:
+            provider: The provider to check.
 
         Returns:
-            List of configured provider names.
+            ``True`` if the environment variable is set and non-trivial.
         """
-        configured: list[str] = []
-        self._console.print("[bold]API Key Setup[/bold]")
-        self._console.print(
-            "[dim]Configure the providers you want to use. "
-            "You can skip any and add them later with 'prism auth add'.[/dim]\n"
-        )
+        key = os.environ.get(provider.env_var, "")
+        provider.is_configured = bool(key and len(key) > 5)
+        return provider.is_configured
 
-        for provider in self._KEY_PROVIDERS:
-            display = self._DISPLAY_NAMES.get(provider, provider)
+    def get_configured_providers(self) -> list[ProviderSetup]:
+        """Get list of all providers with their configuration status.
 
-            want = Confirm.ask(
-                f"  Configure [bold]{display}[/bold]?",
-                default=False,
-                console=self._console,
-            )
-
-            if not want:
-                continue
-
-            # Prompt for API key (masked)
-            key: str = Prompt.ask(
-                f"  Enter API key for {display}",
-                password=True,
-                console=self._console,
-            )
-
-            if not key.strip():
-                self._console.print("  [yellow]Skipped (empty key).[/]")
-                continue
-
-            key = key.strip()
-
-            # Validate format (offline only)
-            if not self._validator.validate_key(provider, key):
-                self._console.print(
-                    f"  [yellow]Warning:[/] Key format doesn't match expected pattern for {provider}."
-                )
-                store_anyway = Confirm.ask(
-                    "  Store anyway?",
-                    default=False,
-                    console=self._console,
-                )
-                if not store_anyway:
-                    self._console.print("  [dim]Skipped.[/]")
-                    continue
-
-            # Store via auth_manager
-            try:
-                self._auth.store_key(provider, key, validate=False)
-                masked = "..." + key[-4:] if len(key) > 4 else "****"
-                self._console.print(
-                    f"  [green]Stored[/] key for {display} ({masked})"
-                )
-                configured.append(provider)
-            except Exception as exc:
-                self._console.print(
-                    f"  [red]Failed to store key:[/] {exc}"
-                )
-                logger.debug("init_store_key_failed", provider=provider, error=str(exc))
-
-        self._console.print()
-        return configured
-
-    def _detect_ollama(self) -> OllamaInfo:
-        """Check if Ollama is installed and running.
-
-        This method checks for the ``ollama`` binary.  In production it would
-        also probe the local API; in tests this is always mocked.
+        Returns:
+            A copy of :data:`PROVIDER_CONFIGS` with ``is_configured``
+            fields updated.
         """
-        installed = shutil.which("ollama") is not None
-        if not installed:
-            return OllamaInfo(installed=False, running=False, models=[])
+        for p in PROVIDER_CONFIGS:
+            self.check_provider(p)
+        return list(PROVIDER_CONFIGS)
 
-        # Try to detect running status by probing localhost:11434
-        running = self._probe_ollama()
-        models: list[str] = []
-        if running:
-            models = self._list_ollama_models()
+    def health_check_provider(self, provider: ProviderSetup) -> bool:
+        """Run a lightweight health check on a configured provider.
 
-        return OllamaInfo(installed=installed, running=running, models=models)
+        Currently checks whether the environment variable is set. In a
+        production build this would also verify the key with a minimal API
+        call; that is intentionally skipped here to avoid real API charges.
 
-    def _probe_ollama(self) -> bool:
-        """Probe whether Ollama is running on localhost.
+        Args:
+            provider: The provider to health-check.
 
-        Returns ``False`` on any error.  MUST be mocked in tests.
+        Returns:
+            ``True`` if the provider appears healthy.
         """
-        try:
-            import urllib.request
-
-            req = urllib.request.Request(
-                "http://localhost:11434/api/tags",
-                method="GET",
-            )
-            with urllib.request.urlopen(req, timeout=2) as resp:  # noqa: S310
-                return resp.status == 200  # type: ignore[no-any-return]
-        except Exception:
+        if not provider.is_configured:
+            provider.is_healthy = False
             return False
+        # Mark healthy if the key looks present and non-empty
+        key = os.environ.get(provider.env_var, "")
+        provider.is_healthy = bool(key and len(key) > 5)
+        return provider.is_healthy
 
-    def _list_ollama_models(self) -> list[str]:
-        """List available Ollama models.  MUST be mocked in tests."""
-        try:
-            import json
-            import urllib.request
+    # ------------------------------------------------------------------
+    # Config / file creation
+    # ------------------------------------------------------------------
 
-            req = urllib.request.Request(
-                "http://localhost:11434/api/tags",
-                method="GET",
-            )
-            with urllib.request.urlopen(req, timeout=2) as resp:  # noqa: S310
-                data = json.loads(resp.read().decode())
-                return [m.get("name", "") for m in data.get("models", [])]
-        except Exception:
-            return []
+    def create_config(
+        self,
+        prism_home: Path | None = None,
+        daily_budget: float = 10.0,
+        monthly_budget: float = 50.0,
+    ) -> Path:
+        """Create ``~/.prism/config.yaml`` with sensible defaults.
 
-    def _create_config(self, configured_providers: list[str]) -> Path:
-        """Create ~/.prism/config.yaml with sensible defaults.
+        Args:
+            prism_home: Override for the Prism home directory.
+            daily_budget: Default daily budget in USD.
+            monthly_budget: Default monthly budget in USD.
 
-        If a config already exists it will NOT be overwritten.
+        Returns:
+            Path to the created config file.
         """
-        config_path = self._settings.config_file_path
-        if config_path.exists():
-            self._console.print(
-                f"[dim]Config already exists at {config_path}, not overwriting.[/]"
-            )
-            return config_path
+        home = prism_home or Path.home() / ".prism"
+        home.mkdir(parents=True, exist_ok=True)
 
-        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_lines = [
+            "# Prism CLI Configuration",
+            "# Generated by prism init",
+            "",
+            "# Budget limits (USD)",
+            "budget:",
+            f"  daily_limit: {daily_budget}",
+            f"  monthly_limit: {monthly_budget}",
+            "  warn_at_percent: 70",
+            "",
+            "# Routing preferences",
+            "routing:",
+            "  prefer_cheap: true",
+            "  fallback_enabled: true",
+            "",
+            "# Logging",
+            "log_level: INFO",
+            "",
+            "# Cache",
+            "cache:",
+            "  enabled: true",
+            "  ttl_seconds: 3600",
+            "",
+        ]
 
-        default_config: dict[str, object] = {
-            "routing": {
-                "simple_threshold": 0.3,
-                "medium_threshold": 0.7,
-            },
-            "budget": {
-                "daily_limit": None,
-                "monthly_limit": None,
-            },
-            "tools": {
-                "web_enabled": False,
-                "allowed_commands": ["python -m pytest"],
-            },
-        }
-
-        # If user configured any premium provider, prefer it
-        if configured_providers:
-            default_config["preferred_provider"] = configured_providers[0]
-
-        with config_path.open("w") as f:
-            yaml.safe_dump(default_config, f, default_flow_style=False)
-
-        self._console.print(f"[green]Created[/] {config_path}")
+        config_path = home / "config.yaml"
+        config_path.write_text("\n".join(config_lines), encoding="utf-8")
+        logger.info("config_created", path=str(config_path))
         return config_path
 
-    def _create_project_config(self, project_root: Path) -> Path:
-        """Create .prism.yaml in project root with project-specific settings.
+    def create_project_memory(self) -> Path:
+        """Create ``.prism.md`` in the project root from a template.
 
-        If the file already exists it will NOT be overwritten.
+        If the file already exists it is **not** overwritten.
+
+        Returns:
+            Path to the ``.prism.md`` file.
         """
-        project_config = project_root / ".prism.yaml"
-        if project_config.exists():
-            self._console.print(
-                f"[dim]Project config already exists at {project_config}, not overwriting.[/]"
+        memory_path = self._root / ".prism.md"
+        if not memory_path.exists():
+            memory_path.write_text(PRISM_MD_TEMPLATE, encoding="utf-8")
+            logger.info("project_memory_created", path=str(memory_path))
+        return memory_path
+
+    def create_prismignore(self) -> Path:
+        """Create ``.prismignore`` with secure defaults.
+
+        Attempts to delegate to :class:`prism.security.prismignore.PrismIgnore`
+        if available; otherwise writes a built-in set of default patterns.
+
+        Returns:
+            Path to the ``.prismignore`` file.
+        """
+        try:
+            from prism.security.prismignore import PrismIgnore
+
+            ignore = PrismIgnore(self._root)
+            return ignore.create_default()
+        except ImportError:
+            # Fallback: write defaults directly
+            ignore_path = self._root / ".prismignore"
+            ignore_path.write_text(
+                "\n".join(PRISMIGNORE_DEFAULTS) + "\n", encoding="utf-8"
             )
-            return project_config
+            logger.info("prismignore_created_fallback", path=str(ignore_path))
+            return ignore_path
 
-        project_name = project_root.name
+    # ------------------------------------------------------------------
+    # Ollama helpers
+    # ------------------------------------------------------------------
 
-        config: dict[str, object] = {
-            "project": project_name,
-            "routing": {
-                "simple_threshold": 0.3,
-                "medium_threshold": 0.7,
-            },
-            "tools": {
-                "allowed_commands": [
-                    "python -m pytest",
-                    "make lint",
-                ],
-            },
-        }
+    def get_recommended_ollama_models(self) -> dict[str, tuple[str, float]]:
+        """Get recommended Ollama models based on available RAM.
 
-        with project_config.open("w") as f:
-            yaml.safe_dump(config, f, default_flow_style=False)
-
-        self._console.print(f"[green]Created[/] {project_config}")
-        return project_config
-
-    def _show_cost_comparison(self, configured_providers: list[str]) -> None:
-        """Display a cost comparison table for configured providers."""
-        table = Table(title="Cost Comparison (per 1M tokens)")
-        table.add_column("Provider", style="bold")
-        table.add_column("Model", style="cyan")
-        table.add_column("Input", justify="right", style="green")
-        table.add_column("Output", justify="right", style="yellow")
-
-        for provider_config in BUILTIN_PROVIDERS:
-            if provider_config.name not in configured_providers and provider_config.name != "ollama":
-                    continue
-            for model in provider_config.models:
-                table.add_row(
-                    provider_config.display_name,
-                    model.display_name,
-                    f"${model.input_cost_per_1m:.2f}",
-                    f"${model.output_cost_per_1m:.2f}",
-                )
-
-        self._console.print()
-        self._console.print(table)
-
-    def _suggest_budget(self, configured_providers: list[str]) -> float | None:
-        """Suggest a daily budget based on configured providers.
-
-        Returns the suggested budget or None if user declines.
+        Returns:
+            A dict mapping model name to ``(description, min_ram_gb)``
+            for models the system can run.
         """
-        if not configured_providers:
-            return None
+        if not self._system_info:
+            self.detect_system()
 
-        # Find cheapest model cost among configured providers for baseline
-        min_cost = float("inf")
-        for _model_id, pricing in MODEL_PRICING.items():
-            if pricing.provider in configured_providers:
-                total = pricing.input_cost_per_1m + pricing.output_cost_per_1m
-                min_cost = min(min_cost, total)
+        ram = self._system_info.ram_gb if self._system_info else 0.0
+        recommended: dict[str, tuple[str, float]] = {}
+        for model, (desc, min_ram) in RECOMMENDED_OLLAMA_MODELS.items():
+            if ram >= min_ram:
+                recommended[model] = (desc, min_ram)
+        return recommended
 
-        # Suggest a daily budget: ~100 requests with cheapest model
-        # assuming 1k input + 1k output tokens per request
-        if min_cost == float("inf") or min_cost == 0:
-            suggested = 5.00
-        else:
-            per_request_cost = min_cost * 2 / 1_000_000 * 1000  # 1k tokens
-            suggested = round(max(1.00, per_request_cost * 100), 2)
+    def get_ollama_install_instructions(self) -> str:
+        """Return platform-specific Ollama installation instructions.
 
-        self._console.print(
-            f"\n[bold]Suggested daily budget:[/bold] ${suggested:.2f}"
+        Returns:
+            A multi-line string with install instructions.
+        """
+        sys_name = platform.system()
+        if sys_name == "Darwin":
+            return (
+                "Install Ollama on macOS:\n"
+                "  brew install ollama\n"
+                "  — or —\n"
+                "  Download from https://ollama.com/download/mac"
+            )
+        if sys_name == "Linux":
+            return (
+                "Install Ollama on Linux:\n"
+                "  curl -fsSL https://ollama.com/install.sh | sh"
+            )
+        return (
+            "Install Ollama:\n"
+            "  Visit https://ollama.com for installation instructions."
         )
-        self._console.print(
-            "[dim]This covers ~100 requests with your cheapest provider.[/dim]"
+
+    # ------------------------------------------------------------------
+    # Cost comparison
+    # ------------------------------------------------------------------
+
+    def get_cost_comparison(self) -> list[dict[str, str]]:
+        """Generate cost comparison table data for configured providers.
+
+        Returns:
+            A list of dicts with ``provider``, ``configured``, and ``cost`` keys.
+        """
+        rows: list[dict[str, str]] = []
+        for p in PROVIDER_CONFIGS:
+            self.check_provider(p)
+            rows.append(
+                {
+                    "provider": p.display_name,
+                    "configured": "Yes" if p.is_configured else "No",
+                    "cost": p.example_cost,
+                }
+            )
+        return rows
+
+    # ------------------------------------------------------------------
+    # Quick-start summary
+    # ------------------------------------------------------------------
+
+    def get_quickstart_commands(self) -> list[str]:
+        """Return a list of quick-start commands the user can try.
+
+        Returns:
+            A list of example shell commands.
+        """
+        return [
+            "prism                      # Start interactive REPL",
+            'prism ask "explain this code"  # Single-shot question',
+            "prism /cost                # View cost dashboard",
+            "prism /model               # Switch AI model",
+            "prism /help                # Show all commands",
+        ]
+
+    # ------------------------------------------------------------------
+    # Full wizard run
+    # ------------------------------------------------------------------
+
+    def run(self) -> WizardResult:
+        """Run the full wizard (non-interactive, returns result).
+
+        Performs system detection, provider checking, config file creation,
+        and health checks.
+
+        Returns:
+            A :class:`WizardResult` summarising everything that was set up.
+        """
+        system_info = self.detect_system()
+        providers = self.get_configured_providers()
+        configured = [p.name for p in providers if p.is_configured]
+
+        # Run health checks on configured providers
+        for p in providers:
+            if p.is_configured:
+                self.health_check_provider(p)
+
+        config_path = self.create_config()
+        memory_path = self.create_project_memory()
+        ignore_path = self.create_prismignore()
+
+        logger.info(
+            "wizard_complete",
+            providers_configured=configured,
+            config=str(config_path),
         )
 
-        return suggested
+        return WizardResult(
+            system_info=system_info,
+            providers_configured=configured,
+            config_path=config_path,
+            memory_path=memory_path,
+            ignore_path=ignore_path,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers — hardware detection
+    # ------------------------------------------------------------------
+
+    def _detect_ram(self) -> float:
+        """Detect available RAM in GB.
+
+        Returns:
+            RAM in gigabytes, or ``0.0`` on failure.
+        """
+        system = platform.system()
+        try:
+            if system == "Darwin":
+                result = subprocess.run(
+                    ["sysctl", "-n", "hw.memsize"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    return int(result.stdout.strip()) / (1024**3)
+            elif system == "Linux":
+                meminfo = Path("/proc/meminfo")
+                if meminfo.exists():
+                    text = meminfo.read_text(encoding="utf-8")
+                    for line in text.splitlines():
+                        if line.startswith("MemTotal:"):
+                            kb = int(line.split()[1])
+                            return kb / (1024**2)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            logger.debug("ram_detection_failed", system=system)
+        return 0.0
+
+    def _detect_gpu(self) -> tuple[bool, str]:
+        """Detect GPU presence.
+
+        Returns:
+            A ``(detected, name)`` tuple. ``name`` is empty when no GPU
+            is found.
+        """
+        system = platform.system()
+        try:
+            if system == "Darwin":
+                result = subprocess.run(
+                    [
+                        "system_profiler",
+                        "SPDisplaysDataType",
+                        "-detailLevel",
+                        "mini",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                if result.returncode == 0 and (
+                    "Chipset" in result.stdout or "Chip" in result.stdout
+                ):
+                    for line in result.stdout.split("\n"):
+                        if "Chipset" in line or "Chip" in line:
+                            return True, line.split(":")[-1].strip()
+
+            # Try nvidia-smi for NVIDIA GPUs on any platform
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return True, result.stdout.strip().split("\n")[0]
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            logger.debug("gpu_detection_failed", system=system)
+        return False, ""
+
+    @staticmethod
+    def _check_ollama_installed() -> bool:
+        """Check if Ollama is installed.
+
+        Returns:
+            ``True`` if the ``ollama`` binary is available.
+        """
+        try:
+            result = subprocess.run(
+                ["ollama", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            return result.returncode == 0
+        except FileNotFoundError:
+            return False
+
+    @staticmethod
+    def _get_ollama_models() -> list[str]:
+        """Get installed Ollama models.
+
+        Returns:
+            A list of model names, or an empty list on failure.
+        """
+        try:
+            result = subprocess.run(
+                ["ollama", "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode == 0:
+                lines = result.stdout.strip().split("\n")
+                models: list[str] = []
+                for line in lines[1:]:
+                    stripped = line.strip()
+                    if stripped:
+                        parts = stripped.split()
+                        if parts:
+                            models.append(parts[0])
+                return models
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return []
+
+    @staticmethod
+    def _check_docker() -> bool:
+        """Check if Docker is available.
+
+        Returns:
+            ``True`` if ``docker info`` succeeds.
+        """
+        try:
+            result = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False

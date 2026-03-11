@@ -275,7 +275,11 @@ def get_provider_for_model(model_id: str) -> str:
     # Infer from model ID prefix
     if "/" in model_id:
         prefix = model_id.split("/", maxsplit=1)[0]
-        known_prefixes = {"gemini", "deepseek", "groq", "mistral", "ollama", "openai"}
+        known_prefixes = {
+            "gemini", "deepseek", "groq", "mistral", "ollama", "openai",
+            "perplexity", "cohere", "together_ai", "fireworks_ai", "moonshot",
+            "qwen",
+        }
         if prefix in known_prefixes:
             return prefix
 
@@ -284,5 +288,7 @@ def get_provider_for_model(model_id: str) -> str:
         return "anthropic"
     if model_id.startswith("gpt") or model_id.startswith("o3") or model_id.startswith("o4"):
         return "openai"
+    if model_id.startswith("moonshot"):
+        return "kimi"
 
     return "unknown"

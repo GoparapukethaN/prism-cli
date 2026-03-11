@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -14,8 +15,12 @@ from prism.cost.pricing import (
 )
 from prism.cost.tracker import BudgetAction
 from prism.exceptions import (
+    AllProvidersFailedError,
     BudgetExceededError,
     ModelNotFoundError,
+    ProviderAuthError,
+    ProviderRateLimitError,
+    ProviderUnavailableError,
 )
 from prism.llm.result import CompletionResult
 from prism.llm.retry import RetryPolicy
@@ -34,6 +39,24 @@ logger = structlog.get_logger(__name__)
 
 # Fallback context windows for models not in the registry.
 _DEFAULT_CONTEXT_WINDOW = 32_768
+
+# Per-provider timeout defaults (seconds)
+PROVIDER_TIMEOUTS: dict[str, float] = {
+    "anthropic": 120.0,
+    "openai": 90.0,
+    "google": 90.0,
+    "deepseek": 120.0,
+    "groq": 30.0,
+    "mistral": 60.0,
+    "ollama": 300.0,  # Local models can be slow
+    "kimi": 90.0,
+    "perplexity": 60.0,
+    "qwen": 90.0,
+    "cohere": 60.0,
+    "together_ai": 60.0,
+    "fireworks_ai": 60.0,
+}
+_DEFAULT_TIMEOUT = 60.0
 
 
 class CompletionEngine:
@@ -350,6 +373,10 @@ class CompletionEngine:
             except Exception:
                 logger.debug("auth_key_not_found", provider=provider)
 
+        # Provider-specific timeout
+        timeout = PROVIDER_TIMEOUTS.get(provider, _DEFAULT_TIMEOUT)
+        kwargs["timeout"] = timeout
+
         # Provider-specific base URL
         model_info = self._registry.get_model_info(model)
         if model_info:
@@ -357,7 +384,258 @@ class CompletionEngine:
             if provider_cfg and provider_cfg.api_base:
                 kwargs["api_base"] = provider_cfg.api_base
 
+        # Apply prompt caching for Anthropic
+        if provider == "anthropic":
+            kwargs["messages"] = self._apply_prompt_caching(model, messages)
+
         return kwargs
+
+    def _apply_prompt_caching(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Apply prompt caching headers for Anthropic models.
+
+        Adds cache_control breakpoints to system messages and the last
+        user message for Anthropic models that support prompt caching.
+
+        Args:
+            model: LiteLLM model identifier.
+            messages: Chat messages to annotate.
+
+        Returns:
+            Messages with cache_control headers added where appropriate.
+        """
+        provider = get_provider_for_model(model)
+        if provider != "anthropic":
+            return messages
+
+        # Deep copy to avoid mutating the caller's list
+        cached_messages: list[dict[str, Any]] = []
+        for msg in messages:
+            new_msg = dict(msg)
+            cached_messages.append(new_msg)
+
+        # Mark system messages as cacheable
+        for msg in cached_messages:
+            if msg.get("role") == "system":
+                content = msg.get("content", "")
+                if isinstance(content, str) and len(content) > 100:
+                    msg["content"] = [
+                        {
+                            "type": "text",
+                            "text": content,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ]
+
+        # Mark the last substantial user message as cacheable
+        for msg in reversed(cached_messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if isinstance(content, str) and len(content) > 200:
+                    msg["content"] = [
+                        {
+                            "type": "text",
+                            "text": content,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ]
+                break
+
+        return cached_messages
+
+    def _handle_provider_error(
+        self,
+        exc: Exception,
+        model: str,
+        provider: str,
+    ) -> None:
+        """Handle provider-specific errors and update registry status.
+
+        Maps HTTP status codes and exception types to appropriate actions:
+        - 429 rate limit: mark provider rate-limited
+        - 401 auth error: log warning, mark unavailable
+        - 503 unavailable: mark provider down
+        - Timeout: log, will be retried by RetryPolicy
+
+        Args:
+            exc: The exception caught.
+            model: Model that was called.
+            provider: Provider name.
+        """
+        status = self._registry.get_status(provider)
+        if status is None:
+            return
+
+        if isinstance(exc, ProviderRateLimitError):
+            from datetime import UTC, datetime, timedelta
+            until = datetime.now(UTC) + timedelta(seconds=exc.retry_after or 60)
+            status.mark_rate_limited(until)
+            logger.warning(
+                "provider_rate_limited_fallback",
+                provider=provider,
+                model=model,
+                retry_after=exc.retry_after,
+            )
+        elif isinstance(exc, ProviderAuthError):
+            status.mark_unavailable(f"Authentication failed for {provider}")
+            logger.error(
+                "provider_auth_failed",
+                provider=provider,
+                model=model,
+            )
+        elif isinstance(exc, ProviderUnavailableError):
+            status.mark_unavailable(str(exc))
+            logger.warning(
+                "provider_unavailable_marked",
+                provider=provider,
+                model=model,
+            )
+        elif isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+            logger.warning(
+                "provider_timeout",
+                provider=provider,
+                model=model,
+            )
+        elif isinstance(exc, (ConnectionError, OSError)):
+            status.mark_unavailable(f"Network error: {exc}")
+            logger.warning(
+                "provider_network_error",
+                provider=provider,
+                model=model,
+                error=str(exc),
+            )
+
+    async def complete_with_fallback(
+        self,
+        messages: list[dict[str, str]],
+        models: list[str],
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        stream: bool = False,
+        tools: list[dict] | None = None,
+        session_id: str = "",
+        complexity_tier: str = "medium",
+    ) -> CompletionResult:
+        """Try models in order, falling back to the next on failure.
+
+        Implements: primary -> secondary -> tertiary -> Ollama fallback.
+
+        Args:
+            messages: Chat messages.
+            models: Ordered list of model IDs to try.
+            temperature: Sampling temperature.
+            max_tokens: Maximum output tokens.
+            stream: Whether to stream.
+            tools: Tool definitions.
+            session_id: Session ID for cost tracking.
+            complexity_tier: Complexity tier label.
+
+        Returns:
+            CompletionResult from the first successful model.
+
+        Raises:
+            AllProvidersFailedError: If all models fail.
+        """
+        tried: list[str] = []
+        last_error_msg = ""
+
+        for model in models:
+            tried.append(model)
+            try:
+                result = await self.complete(
+                    messages=messages,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=stream,
+                    tools=tools,
+                    session_id=session_id,
+                    complexity_tier=complexity_tier,
+                )
+                if len(tried) > 1:
+                    logger.info(
+                        "fallback_succeeded",
+                        model=model,
+                        tried=tried,
+                    )
+                return result
+            except BudgetExceededError:
+                # Budget errors should not trigger fallback — propagate
+                raise
+            except Exception as exc:
+                provider = get_provider_for_model(model)
+                self._handle_provider_error(exc, model, provider)
+                last_error_msg = str(exc)
+                logger.warning(
+                    "fallback_model_failed",
+                    model=model,
+                    error=str(exc),
+                    remaining=len(models) - len(tried),
+                )
+
+        raise AllProvidersFailedError(tried, last_error_msg)
+
+    async def complete_parallel(
+        self,
+        messages: list[dict[str, str]],
+        models: list[str],
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        session_id: str = "",
+        complexity_tier: str = "medium",
+    ) -> list[CompletionResult]:
+        """Run completions on multiple models in parallel.
+
+        Useful for model comparison or when the best model is uncertain.
+
+        Args:
+            messages: Chat messages (same for all models).
+            models: List of model IDs to call concurrently.
+            temperature: Sampling temperature.
+            max_tokens: Maximum output tokens.
+            session_id: Session ID for cost tracking.
+            complexity_tier: Complexity tier label.
+
+        Returns:
+            List of CompletionResults (one per model that succeeded).
+            Failed models are excluded with a warning logged.
+        """
+        async def _try_model(model: str) -> CompletionResult | None:
+            try:
+                return await self.complete(
+                    messages=messages,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    session_id=session_id,
+                    complexity_tier=complexity_tier,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "parallel_model_failed",
+                    model=model,
+                    error=str(exc),
+                )
+                return None
+
+        tasks = [_try_model(m) for m in models]
+        results = await asyncio.gather(*tasks)
+        return [r for r in results if r is not None]
+
+    @staticmethod
+    def get_provider_timeout(provider: str) -> float:
+        """Get the configured timeout for a provider.
+
+        Args:
+            provider: Provider name.
+
+        Returns:
+            Timeout in seconds.
+        """
+        return PROVIDER_TIMEOUTS.get(provider, _DEFAULT_TIMEOUT)
 
     @staticmethod
     def _parse_response(

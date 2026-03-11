@@ -30,6 +30,10 @@ app.add_typer(config_app, name="config")
 db_app = typer.Typer(help="Database maintenance commands.")
 app.add_typer(db_app, name="db")
 
+from prism.cli.commands.projects import projects_app  # noqa: E402
+
+app.add_typer(projects_app, name="projects")
+
 
 def version_callback(value: bool) -> None:
     """Print version and exit."""
@@ -105,6 +109,12 @@ def main_callback(
         "--offline",
         help="Disable all cloud providers (Ollama only).",
     ),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        "-p",
+        help="Switch to a registered project by name before starting.",
+    ),
 ) -> None:
     """Start Prism interactive REPL or run with subcommands."""
     if ctx.invoked_subcommand is not None:
@@ -123,6 +133,7 @@ def main_callback(
         new_session=new_session,
         budget=budget,
         offline=offline,
+        project=project,
     )
 
 
@@ -137,6 +148,7 @@ def _start_repl(
     new_session: bool,
     budget: float | None,
     offline: bool,
+    project: str | None = None,
 ) -> None:
     """Initialize and start the interactive REPL."""
     from prism.config.settings import load_settings
@@ -161,9 +173,25 @@ def _start_repl(
 
     _configure_logging(log_level)
 
+    # Handle --project flag: switch to the named project and use its root
+    effective_root = root
+    if project:
+        settings_tmp = load_settings()
+        settings_tmp.ensure_directories()
+        from prism.workspace.manager import WorkspaceManager
+
+        workspace = WorkspaceManager(settings_tmp.prism_home)
+        try:
+            proj = workspace.switch_project(project)
+            effective_root = Path(proj.path)
+            console.print(f"[cyan]Project:[/] {proj.name} ({proj.path})")
+        except ValueError as exc:
+            console.print(f"[red]Error:[/] {exc}")
+            raise typer.Exit(1) from exc
+
     # Load settings
     settings = load_settings(
-        project_root=root,
+        project_root=effective_root,
         config_overrides=overrides,
     )
     settings.ensure_directories()
@@ -173,6 +201,9 @@ def _start_repl(
 
     if offline:
         console.print("[yellow]Offline mode:[/] cloud providers disabled, Ollama only.")
+
+    # Show recent projects on startup
+    _show_recent_projects(settings)
 
     # Print welcome banner
     _print_banner(settings)
@@ -203,6 +234,32 @@ def _configure_logging(level: str) -> None:
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
     )
+
+
+def _show_recent_projects(settings: object) -> None:
+    """Show recent projects on startup if any are registered."""
+    from prism.config.settings import Settings
+
+    if not isinstance(settings, Settings):
+        return
+
+    try:
+        from prism.workspace.manager import WorkspaceManager
+
+        workspace = WorkspaceManager(settings.prism_home)
+        recent = workspace.get_recent_projects(limit=3)
+        if recent:
+            active = workspace.get_active_project()
+            active_name = active.name if active else None
+            names = []
+            for p in recent:
+                if p.name == active_name:
+                    names.append(f"[bold cyan]{p.name}[/bold cyan]")
+                else:
+                    names.append(f"[dim]{p.name}[/dim]")
+            console.print(f"[dim]Projects:[/dim] {' | '.join(names)}")
+    except Exception:  # noqa: S110
+        pass  # Non-critical — don't block startup
 
 
 def _print_banner(settings: object) -> None:

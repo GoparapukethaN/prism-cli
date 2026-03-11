@@ -58,11 +58,12 @@ class TestModelIDs:
         ids = [m.id for m in KIMI_CONFIG.models]
         assert "moonshot/moonshot-v1-8k" in ids
         assert "moonshot/moonshot-v1-32k" in ids
+        assert "moonshot/moonshot-v1-128k" in ids
 
     def test_perplexity_model_ids(self) -> None:
         ids = [m.id for m in PERPLEXITY_CONFIG.models]
-        assert "perplexity/pplx-70b-online" in ids
-        assert "perplexity/pplx-sonar-medium" in ids
+        assert "perplexity/llama-3.1-sonar-large-128k-online" in ids
+        assert "perplexity/llama-3.1-sonar-small-128k-online" in ids
 
     def test_qwen_model_ids(self) -> None:
         ids = [m.id for m in QWEN_CONFIG.models]

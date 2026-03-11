@@ -1,185 +1,271 @@
-# CONTRIBUTING.md — Contributing to Prism
+# Contributing to Prism
 
-## Welcome
+Thank you for your interest in contributing to Prism! This document explains how to get started, the development workflow, and how to submit high-quality contributions.
 
-Prism is an open-source project under Apache 2.0 license. Contributions are welcome from everyone.
+## Table of Contents
+
+- [Getting Started](#getting-started)
+- [Development Setup](#development-setup)
+- [How to Add a Provider](#how-to-add-a-provider)
+- [How to Add a Tool](#how-to-add-a-tool)
+- [How to Add a Plugin](#how-to-add-a-plugin)
+- [Development Workflow](#development-workflow)
+- [Pull Request Checklist](#pull-request-checklist)
+- [Testing Guidelines](#testing-guidelines)
+- [Code Style](#code-style)
+- [Reporting Issues](#reporting-issues)
+- [Code of Conduct](#code-of-conduct)
 
 ## Getting Started
 
 ### Prerequisites
-- Python 3.11+
+
+- Python 3.11 or higher
 - Git
 - (Optional) Ollama for local model testing
+- (Optional) `pipx` for isolated CLI installation
 
-### Setup
+### Development Setup
+
 ```bash
-# Fork and clone
-git clone https://github.com/GoparapukethaN/prism-cli.git
+# 1. Fork and clone the repository
+git clone https://github.com/<your-username>/prism-cli.git
 cd prism-cli
 
-# Create virtual environment
+# 2. Create and activate a virtual environment
 python3 -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+source .venv/bin/activate  # macOS / Linux
+# .venv\Scripts\activate   # Windows
 
-# Install with dev dependencies
+# 3. Install with all optional dependencies and dev tools
 pip install -e ".[all,dev]"
 
-# Install pre-commit hooks
+# 4. Install pre-commit hooks
 pre-commit install
 
-# Verify everything works
-make review
+# 5. Verify everything works
+ruff check src/ tests/
+pytest tests/ --cov=src/prism --cov-fail-under=90
+bandit -r src/prism/ -c pyproject.toml
 ```
 
-## Contribution Types
+If all checks pass, you are ready to contribute.
 
-### 1. New Provider
-Add a LiteLLM-compatible model configuration:
-1. Create `src/prism/providers/<provider>.py`
-2. Add model configs with pricing and tier assignments
-3. Register in `src/prism/providers/registry.py`
-4. Add tests in `tests/test_providers/test_<provider>.py`
-5. Update PROVIDER_SPECS.md
+## How to Add a Provider
 
-### 2. New Tool
-Implement the `Tool` interface:
-1. Create `src/prism/tools/<tool_name>.py`
-2. Implement `name`, `description`, `parameters_schema`, `permission_level`, `execute()`
-3. Register in `src/prism/tools/registry.py`
-4. Add tests in `tests/test_tools/test_<tool_name>.py`
-5. Update TOOL_SPECS.md
+Prism uses LiteLLM under the hood, so adding a new provider is straightforward:
 
-### 3. Routing Improvements
-Improve classification accuracy or cost optimization:
-1. Modify `src/prism/router/classifier.py` or `selector.py`
-2. Add tests showing improvement over baseline
-3. Include benchmark results in PR description
+1. **Create the provider config** at `src/prism/providers/<provider_name>.py`:
+   - Define a `ProviderConfig` dataclass with the provider's models, pricing, and tier assignments.
+   - Each model needs: `id`, `display_name`, `tier` (simple/medium/complex), `input_cost_per_1m`, `output_cost_per_1m`, `context_window`.
 
-### 4. Bug Fixes
-1. Create a test that reproduces the bug
-2. Fix the bug
-3. Verify the test passes
-4. Submit PR with "Fixes #<issue>" in description
+2. **Register the provider** in `src/prism/providers/registry.py`:
+   - Add the provider to the `PROVIDER_REGISTRY` dict.
+   - Set the LiteLLM prefix (e.g., `"anthropic/"`, `"openai/"`).
 
-### 5. Documentation
-1. Update relevant .md files
-2. Ensure code examples are correct and runnable
+3. **Add tests** at `tests/test_providers/test_<provider_name>.py`:
+   - Test model listing, pricing lookups, and tier assignments.
+   - All provider interactions must be mocked (no real API calls).
+
+4. **Update documentation** if needed.
+
+## How to Add a Tool
+
+Tools extend Prism's capabilities (file ops, search, terminal, web):
+
+1. **Implement the Tool interface** at `src/prism/tools/<tool_name>.py`:
+   ```python
+   from prism.tools.base import Tool, ToolResult
+
+   class MyTool(Tool):
+       @property
+       def name(self) -> str:
+           return "my_tool"
+
+       @property
+       def description(self) -> str:
+           return "Description of what this tool does"
+
+       @property
+       def parameters_schema(self) -> dict:
+           return {
+               "type": "object",
+               "properties": {
+                   "param1": {"type": "string", "description": "..."},
+               },
+               "required": ["param1"],
+           }
+
+       @property
+       def permission_level(self) -> str:
+           return "read"  # or "write", "execute"
+
+       async def execute(self, **kwargs) -> ToolResult:
+           # Implementation here
+           ...
+   ```
+
+2. **Register** in `src/prism/tools/registry.py`.
+
+3. **Add tests** at `tests/test_tools/test_<tool_name>.py`.
+
+4. **Security**: Ensure all inputs are validated and paths are confined to the project root.
+
+## How to Add a Plugin
+
+Plugins are optional extensions that can be enabled/disabled:
+
+1. Create the plugin module under `src/prism/plugins/<plugin_name>/`.
+2. Implement a `setup()` function that registers the plugin's tools and hooks.
+3. Add an entry point in `pyproject.toml` if the plugin should be discoverable.
+4. Add tests at `tests/test_plugins/test_<plugin_name>.py`.
 
 ## Development Workflow
 
-### Branch from main
+### 1. Create a branch
+
 ```bash
 git checkout main
 git pull origin main
-git checkout -b feat/your-feature
+git checkout -b feat/your-feature-name
 ```
 
-### Make changes
-- Follow coding conventions in CONVENTIONS.md
-- Write tests for all new code
-- Run the full review suite:
+### 2. Make changes
+
+- Follow the coding standards in [Code Style](#code-style).
+- Write tests for all new code.
+- Run the review suite frequently:
   ```bash
-  make review
+  ruff check src/ tests/
+  pytest tests/ --cov=src/prism
+  bandit -r src/prism/ -c pyproject.toml
   ```
 
-### Commit
+### 3. Commit
+
+Follow the conventional commit format:
+
+```
+type(scope): concise description
+
+Types: feat, fix, refactor, test, docs, chore, perf, security
+Scope: cli, router, providers, tools, context, auth, db, cost, git, security, config
+```
+
+Examples:
+- `feat(router): add context-window-aware model selection`
+- `fix(tools): prevent path traversal in file_read`
+- `test(auth): add keyring fallback coverage`
+
+### 4. Push and create a PR
+
 ```bash
-git add <specific files>
-git commit -m "feat(module): concise description"
+git push -u origin feat/your-feature-name
+gh pr create --title "feat(router): add context-window-aware model selection"
 ```
 
-Follow commit conventions:
-- `feat(scope)`: New feature
-- `fix(scope)`: Bug fix
-- `test(scope)`: Test additions
-- `docs(scope)`: Documentation
-- `refactor(scope)`: Code restructuring
-- `perf(scope)`: Performance improvement
-- `security(scope)`: Security fix
+## Pull Request Checklist
 
-### Push and create PR
-```bash
-git push -u origin feat/your-feature
-# Create PR via GitHub UI or gh cli
+Before submitting your PR, ensure:
+
+- [ ] All new code has type hints on every function signature and return type
+- [ ] All public functions and classes have Google-style docstrings
+- [ ] No hardcoded secrets, API keys, or tokens anywhere
+- [ ] `ruff check src/ tests/` passes with zero errors
+- [ ] `ruff format --check src/ tests/` passes
+- [ ] `bandit -r src/prism/ -c pyproject.toml` reports no issues
+- [ ] `pytest tests/ --cov=src/prism --cov-fail-under=90` passes
+- [ ] New code has test coverage of at least 90%
+- [ ] Security modules have test coverage of at least 95%
+- [ ] No real API calls in tests (all mocked)
+- [ ] PR title follows conventional commit format
+- [ ] PR description explains the "why", not just the "what"
+
+## Testing Guidelines
+
+### Critical Rules
+
+1. **No real API calls.** All tests must run completely offline. Use `pytest-mock`, `respx`, and hardcoded mock responses.
+2. **No real API keys.** Use obviously fake keys like `"sk-test-key-1234"`.
+3. **Coverage minimum**: 90% overall, 95% for security modules.
+4. **Test file naming**: `test_<module_name>.py` in the corresponding `tests/test_<package>/` directory.
+
+### Test Structure
+
+```python
+"""Tests for the thing being tested."""
+
+from __future__ import annotations
+
+import pytest
+
+from prism.module import ThingBeingTested
+
+
+class TestThingBeingTested:
+    """Group related tests in a class."""
+
+    def test_happy_path(self) -> None:
+        """Test the normal case."""
+        result = ThingBeingTested().do_something("input")
+        assert result == "expected"
+
+    def test_edge_case_empty_input(self) -> None:
+        """Test with empty input."""
+        result = ThingBeingTested().do_something("")
+        assert result == ""
+
+    def test_error_case(self) -> None:
+        """Test that errors are handled correctly."""
+        with pytest.raises(ValueError, match="specific message"):
+            ThingBeingTested().do_something(None)
 ```
 
-## Pull Request Guidelines
+## Code Style
 
-### PR Title
-- Under 70 characters
-- Follow commit message format: `feat(router): add context-window-aware routing`
-
-### PR Body Template
-```markdown
-## Summary
-- Brief description of what this PR does
-- Why this change is needed
-
-## Changes
-- List of specific changes
-
-## Test Plan
-- [ ] Unit tests added/updated
-- [ ] Integration tests (if applicable)
-- [ ] Security tests (if applicable)
-- [ ] All existing tests pass
-
-## Checklist
-- [ ] Code follows CONVENTIONS.md
-- [ ] No hardcoded secrets
-- [ ] All functions have type hints
-- [ ] Tests have ≥90% coverage for changed code
-- [ ] `ruff check` passes
-- [ ] `mypy` passes
-- [ ] `bandit` passes
-- [ ] Documentation updated (if applicable)
-```
-
-## Testing Rules
-
-### CRITICAL: No Real API Calls
-- All tests must run completely offline
-- All provider interactions must be mocked
-- Never use real API keys in tests
-- Use `pytest-mock` and `respx` for mocking
-- Use hardcoded mock responses
-
-### Coverage Requirements
-- Overall: ≥ 90%
-- Security modules: ≥ 95%
-- New code in PR: ≥ 90%
-
-## Code Review Process
-
-1. Automated checks must pass (CI)
-2. At least one maintainer review
-3. All review comments addressed
-4. Squash merge to main
+- **Python 3.11+** minimum, use modern syntax (`X | Y` unions, `match/case`, etc.)
+- **Type hints everywhere**: every function parameter, return type, and non-obvious variable
+- **Docstrings**: Google style on every public function and class
+- **Formatter/linter**: `ruff` (replaces black + isort + flake8)
+- **Line length**: 100 characters maximum
+- **Imports**: stdlib, then third-party, then local (enforced by ruff isort)
+- **Paths**: Use `pathlib.Path` instead of `os.path`
+- **Data structures**: `dataclasses` or `pydantic` models
+- **I/O**: Async by default (`httpx`, `litellm` async calls)
+- **Resources**: Context managers for DB connections, file handles, etc.
 
 ## Reporting Issues
 
 ### Bug Reports
-Include:
+
+Open an issue using the [Bug Report template](.github/ISSUE_TEMPLATE/bug_report.md) and include:
+
 - Prism version (`prism --version`)
 - Python version
-- OS
+- Operating system
 - Steps to reproduce
-- Expected vs actual behavior
+- Expected vs. actual behavior
 - Relevant logs (with secrets redacted)
 
 ### Feature Requests
-Include:
+
+Open an issue using the [Feature Request template](.github/ISSUE_TEMPLATE/feature_request.md) and include:
+
 - Use case description
-- Proposed solution (if any)
+- Proposed solution
 - Alternatives considered
+
+### Security Vulnerabilities
+
+Do NOT open a public issue. See [SECURITY.md](.github/SECURITY.md) for responsible disclosure instructions.
 
 ## Code of Conduct
 
-- Be respectful and constructive
-- Focus on the code, not the person
-- Welcome newcomers
-- Help each other learn
+- Be respectful and constructive in all interactions.
+- Focus on the code, not the person.
+- Welcome newcomers and help them get started.
+- Assume good intentions.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the Apache 2.0 License.
+By contributing to Prism, you agree that your contributions will be licensed under the [Apache 2.0 License](LICENSE).

@@ -26,6 +26,21 @@ class HealthStatus:
     models_available: list[str] = field(default_factory=list)
 
 
+@dataclass
+class ProviderDashboardEntry:
+    """Entry in the provider availability dashboard."""
+
+    provider: str
+    display_name: str
+    status: str  # "healthy", "degraded", "down", "unconfigured"
+    latency_ms: float | None = None
+    models_count: int = 0
+    error: str | None = None
+    has_api_key: bool = False
+    free_tier: bool = False
+    free_tier_remaining: int | None = None
+
+
 class HealthChecker:
     """Checks provider availability, optionally with a lightweight API ping.
 
@@ -123,3 +138,73 @@ class HealthChecker:
                 latency_ms=elapsed,
                 error=str(exc),
             )
+
+    async def generate_dashboard(
+        self,
+        providers: list[str],
+        registry: Any = None,
+    ) -> list[ProviderDashboardEntry]:
+        """Generate a provider availability dashboard.
+
+        Runs health checks on all providers and enriches results with
+        registry metadata (model counts, free tier info, etc.).
+
+        Args:
+            providers: Provider names to check.
+            registry: Optional ProviderRegistry for enrichment.
+
+        Returns:
+            List of ProviderDashboardEntry, one per provider.
+        """
+        statuses = await self.check_all(providers)
+        entries: list[ProviderDashboardEntry] = []
+
+        for provider_name in providers:
+            health = statuses.get(provider_name)
+            status_str = "healthy"
+            latency = None
+            error = None
+            models_count = 0
+            display_name = provider_name.replace("_", " ").title()
+            has_key = False
+            free_tier = False
+            free_remaining = None
+
+            if health is not None:
+                latency = health.latency_ms
+                error = health.error
+                if not health.available:
+                    status_str = "down"
+                elif health.latency_ms is not None and health.latency_ms > 5000:
+                    status_str = "degraded"
+                models_count = len(health.models_available)
+
+            if registry is not None:
+                provider_cfg = registry.get_provider(provider_name)
+                if provider_cfg is not None:
+                    display_name = provider_cfg.display_name
+                    models_count = len(provider_cfg.models)
+                    free_tier = provider_cfg.free_tier is not None
+                    free_remaining = registry.get_free_tier_remaining(
+                        provider_name,
+                    )
+
+                has_key = registry.is_provider_available(provider_name)
+                if not has_key and provider_name != "ollama":
+                    status_str = "unconfigured"
+
+            entries.append(
+                ProviderDashboardEntry(
+                    provider=provider_name,
+                    display_name=display_name,
+                    status=status_str,
+                    latency_ms=latency,
+                    models_count=models_count,
+                    error=error,
+                    has_api_key=has_key,
+                    free_tier=free_tier,
+                    free_tier_remaining=free_remaining,
+                )
+            )
+
+        return entries
