@@ -108,6 +108,7 @@ class BlastRadiusAnalyzer:
         self._reports_dir.mkdir(parents=True, exist_ok=True)
         self._call_graph: dict[str, set[str]] = {}
         self._import_graph: dict[str, set[str]] = {}
+        self._last_report_path: Path | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -173,12 +174,244 @@ class BlastRadiusAnalyzer:
             created_at=datetime.now(UTC).isoformat(),
         )
 
-        self._save_report(report)
+        self._last_report_path = self._save_report(report)
         return report
 
     def list_reports(self) -> list[Path]:
         """List saved impact reports, newest first."""
         return sorted(self._reports_dir.glob("impact_*.json"), reverse=True)
+
+    def load_report(self, path: Path) -> ImpactReport:
+        """Load an impact report from a JSON file.
+
+        Args:
+            path: Path to the JSON report file.
+
+        Returns:
+            The deserialized :class:`ImpactReport`.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            json.JSONDecodeError: If the file is not valid JSON.
+        """
+        data = json.loads(path.read_text(encoding="utf-8"))
+        # Reconstruct nested AffectedFile dataclass instances
+        raw_files = data.pop("affected_files", [])
+        affected_files = [AffectedFile(**af) for af in raw_files]
+        return ImpactReport(affected_files=affected_files, **data)
+
+    def get_summary(self, report: ImpactReport) -> str:
+        """Return a concise text summary of an impact report.
+
+        Args:
+            report: The impact report to summarise.
+
+        Returns:
+            A multi-line string with risk score, complexity, file counts,
+            missing tests count, and critical paths.
+        """
+        high_count = sum(
+            1 for af in report.affected_files
+            if af.risk_level == RiskLevel.HIGH
+        )
+        medium_count = sum(
+            1 for af in report.affected_files
+            if af.risk_level == RiskLevel.MEDIUM
+        )
+        low_count = sum(
+            1 for af in report.affected_files
+            if af.risk_level == RiskLevel.LOW
+        )
+
+        lines = [
+            f"Impact Report: {report.description}",
+            f"Risk Score: {report.risk_score}/100",
+            f"Complexity: {report.estimated_complexity}",
+            f"Total Files Affected: {report.file_count}",
+            f"  HIGH risk:   {high_count}",
+            f"  MEDIUM risk: {medium_count}",
+            f"  LOW risk:    {low_count}",
+            f"Missing Tests: {len(report.missing_tests)}",
+        ]
+
+        if report.critical_paths:
+            lines.append("Critical Paths:")
+            for cp in report.critical_paths:
+                lines.append(f"  - {cp}")
+
+        return "\n".join(lines)
+
+    @property
+    def last_report_path(self) -> Path | None:
+        """Return the path of the most recently saved report, or ``None``."""
+        return self._last_report_path
+
+    def generate_report_text(self, report: ImpactReport) -> str:
+        """Generate a detailed plain-text report suitable for pager display.
+
+        The report includes a header with risk score, files grouped by risk
+        level, test recommendations, missing tests with priority labels,
+        execution order, complexity-to-effort mapping, and a recommended
+        approach line.
+
+        Args:
+            report: The impact report to format.
+
+        Returns:
+            A multi-line formatted string.
+        """
+        complexity_effort: dict[str, str] = {
+            "trivial": "<1 hour",
+            "simple": "1-2 hours",
+            "moderate": "2-4 hours",
+            "complex": "4-8 hours",
+        }
+
+        approach_map: dict[str, str] = {
+            "complex": "incremental (test-first on critical areas)",
+            "moderate": "incremental (test-first on critical areas)",
+            "simple": "direct",
+            "trivial": "direct",
+        }
+
+        # Group files by risk level
+        high_files = [
+            af for af in report.affected_files
+            if af.risk_level == RiskLevel.HIGH
+        ]
+        medium_files = [
+            af for af in report.affected_files
+            if af.risk_level == RiskLevel.MEDIUM
+        ]
+        low_files = [
+            af for af in report.affected_files
+            if af.risk_level == RiskLevel.LOW
+        ]
+
+        lines: list[str] = []
+
+        # --- Header ---
+        lines.append("=" * 70)
+        lines.append("BLAST RADIUS REPORT")
+        lines.append("=" * 70)
+        lines.append(f"Change: {report.description}")
+        lines.append(
+            f"Risk Score: {report.risk_score}/100"
+            f"  [{self._risk_label(report.risk_score)}]"
+        )
+        lines.append(
+            f"Complexity: {report.estimated_complexity}"
+        )
+        lines.append(f"Files Affected: {report.file_count}")
+        lines.append("")
+
+        # --- Critical (HIGH) areas ---
+        if high_files:
+            lines.append("-" * 40)
+            lines.append("CRITICAL AREAS (HIGH risk)")
+            lines.append("-" * 40)
+            for af in high_files:
+                tested_label = "TESTED" if af.has_tests else "UNTESTED"
+                caller_count = len(af.affected_functions)
+                lines.append(
+                    f"  {af.path}  [{tested_label}]"
+                    f"  callers={caller_count}"
+                )
+                if af.affected_functions:
+                    lines.append(
+                        f"    functions: {', '.join(af.affected_functions)}"
+                    )
+                if af.test_files:
+                    lines.append(
+                        f"    tests: {', '.join(af.test_files)}"
+                    )
+                lines.append(f"    reason: {af.reason}")
+            lines.append("")
+
+        # --- Medium areas ---
+        if medium_files:
+            lines.append("-" * 40)
+            lines.append("MEDIUM RISK AREAS")
+            lines.append("-" * 40)
+            for af in medium_files:
+                tested_label = "TESTED" if af.has_tests else "UNTESTED"
+                lines.append(f"  {af.path}  [{tested_label}]")
+                lines.append(f"    reason: {af.reason}")
+            lines.append("")
+
+        # --- Low areas ---
+        if low_files:
+            lines.append("-" * 40)
+            lines.append("LOW RISK AREAS")
+            lines.append("-" * 40)
+            for af in low_files:
+                tested_label = "TESTED" if af.has_tests else "UNTESTED"
+                lines.append(f"  {af.path}  [{tested_label}]")
+                lines.append(f"    reason: {af.reason}")
+            lines.append("")
+
+        # --- Test recommendations ---
+        if report.recommended_test_order:
+            lines.append("-" * 40)
+            lines.append("TEST RECOMMENDATIONS")
+            lines.append("-" * 40)
+            test_paths = " ".join(report.recommended_test_order)
+            lines.append(f"  pytest {test_paths}")
+            lines.append("")
+
+        # --- Missing tests ---
+        if report.missing_tests:
+            lines.append("-" * 40)
+            lines.append("MISSING TESTS")
+            lines.append("-" * 40)
+            critical_missing = {af.path for af in high_files if not af.has_tests}
+            for mt in report.missing_tests:
+                priority = "HIGH PRIORITY" if mt in critical_missing else "normal"
+                lines.append(f"  [{priority}] {mt}")
+            lines.append("")
+
+        # --- Execution order ---
+        if report.execution_order:
+            lines.append("-" * 40)
+            lines.append("RECOMMENDED EXECUTION ORDER")
+            lines.append("-" * 40)
+            for idx, path in enumerate(report.execution_order, 1):
+                lines.append(f"  {idx}. {path}")
+            lines.append("")
+
+        # --- Estimated effort ---
+        effort = complexity_effort.get(
+            report.estimated_complexity, "unknown",
+        )
+        approach = approach_map.get(
+            report.estimated_complexity, "direct",
+        )
+        lines.append("-" * 40)
+        lines.append("EFFORT ESTIMATE")
+        lines.append("-" * 40)
+        lines.append(f"  Complexity: {report.estimated_complexity}")
+        lines.append(f"  Estimated effort: {effort}")
+        lines.append(f"  Recommended approach: {approach}")
+        lines.append("")
+        lines.append("=" * 70)
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _risk_label(score: int) -> str:
+        """Return a human-readable risk label for a numeric score.
+
+        Args:
+            score: Risk score from 0 to 100.
+
+        Returns:
+            ``"HIGH"``, ``"MEDIUM"``, or ``"LOW"`` depending on thresholds.
+        """
+        if score >= 70:
+            return "HIGH"
+        if score >= 40:
+            return "MEDIUM"
+        return "LOW"
 
     # ------------------------------------------------------------------
     # Graph construction
@@ -276,17 +509,40 @@ class BlastRadiusAnalyzer:
     # Affected-file expansion
     # ------------------------------------------------------------------
 
+    def _extract_public_functions(self, file_path: str) -> list[str]:
+        """Extract public function names from a Python file via AST.
+
+        Args:
+            file_path: Relative path to the Python file from the project root.
+
+        Returns:
+            List of public function names (those not starting with ``_``).
+        """
+        abs_path = self._root / file_path
+        if not abs_path.is_file():
+            return []
+        try:
+            tree = ast.parse(abs_path.read_text(encoding="utf-8"))
+        except (SyntaxError, OSError):
+            return []
+
+        functions: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_"):
+                functions.append(node.name)
+        return functions
+
     def _find_affected(self, targets: list[str]) -> list[AffectedFile]:
         """Find all affected files at depths 0, 1, and 2."""
         affected: dict[str, AffectedFile] = {}
 
-        # Depth 0: direct targets
+        # Depth 0: direct targets — includes extracted public functions
         for t in targets:
             affected[t] = AffectedFile(
                 path=t,
                 risk_level=RiskLevel.MEDIUM,
                 reason="Direct target",
-                affected_functions=[],
+                affected_functions=self._extract_public_functions(t),
                 has_tests=False,
                 test_files=[],
                 depth=0,

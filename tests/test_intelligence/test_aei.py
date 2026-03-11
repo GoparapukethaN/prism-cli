@@ -77,16 +77,18 @@ class TestFixStrategy:
             "ast_diff",
             "full_rewrite",
             "context_expand",
+            "add_defensive_code",
             "model_escalate",
             "decompose_subtasks",
+            "revert_and_redesign",
             "multi_model_debate",
         }
         actual = {s.value for s in FixStrategy}
         assert actual == expected
 
     def test_enum_member_count(self) -> None:
-        """There are exactly 7 strategies."""
-        assert len(FixStrategy) == 7
+        """There are exactly 9 strategies."""
+        assert len(FixStrategy) == 9
 
     def test_strategy_order_contains_all(self) -> None:
         """STRATEGY_ORDER covers every FixStrategy member."""

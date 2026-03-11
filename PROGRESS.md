@@ -1,6 +1,6 @@
 # PROGRESS.md — Prism Development Progress Tracker
 
-## Overall Status: v0.2.0 — All Phases Enhanced, 4,079 tests
+## Overall Status: v0.2.0 — All Phases Enhanced, 4,309 tests
 
 ### Phase 0: Project Setup (COMPLETE)
 | Task | Status | Notes |
@@ -82,16 +82,16 @@
 ### Phase 5: 10 Distinctive Features (COMPLETE)
 | Task | Status | Notes |
 |------|--------|-------|
-| 19. Adaptive Execution Intelligence | DONE | SQLite attempt_log, error fingerprinting, 3-strike escalation, cross-repo learning, 64 tests |
-| 20. Causal Blame Tracer | DONE | Automated git bisect, causal narrative, commit analysis, blame reports, 47 tests |
-| 21. Living Architecture Map | DONE | AST-based module scanning, Mermaid diagrams, drift detection, 64 tests |
-| 22. Cross-Session Debugging Memory | DONE | BugFingerprint, similarity search, cross-project fix retrieval, 48 tests |
-| 23. Predictive Blast Radius Analysis | DONE | Import/call graph, risk scoring 0-100, execution ordering, 52 tests |
-| 24. Intelligent Test Gap Hunter | DONE | AST function scanning, 4-tier risk, test stub generation, 57 tests |
-| 25. Autonomous Dependency Health Monitor | DONE | Multi-ecosystem parsing, vulnerability scanning, migration assessment, 68 tests |
-| 26. Multi-Model Debate Mode | DONE | 3-round structured debate, parallel positions, synthesis, 43 tests |
-| 27. Temporal Code Archaeologist | DONE | Git history tracing, author analysis, narrative generation, 112 tests |
-| 28. Smart Context Budget Manager | DONE | Relevance scoring, token budget enforcement, context optimization, 80 tests |
+| 19. Adaptive Execution Intelligence | ENHANCED | 9 strategies (added ADD_DEFENSIVE_CODE, REVERT_AND_REDESIGN), explain(), /aei REPL, 94 tests |
+| 20. Causal Blame Tracer | ENHANCED | /blame REPL command, prism blame CLI, trace/list/bisect, 67 tests |
+| 21. Living Architecture Map | ENHANCED | /arch mermaid/check/diff subcommands, boundary checking, 89 tests |
+| 22. Cross-Session Debugging Memory | ENHANCED | /debug-memory bugs/forget/export/import subcommands, 73 tests |
+| 23. Predictive Blast Radius Analysis | ENHANCED | load_report(), get_summary(), /impact alias, prism impact CLI, 82 tests |
+| 24. Intelligent Test Gap Hunter | ENHANCED | Semantic gap analysis (error paths, boundary, async, external deps), prism test-gaps CLI (--critical/--fix/--ci/--module), auto test generation, 80+ tests |
+| 25. Autonomous Dependency Health Monitor | ENHANCED | 7 ecosystem parsers (Python/Node/Rust/Go/Ruby/Java), OSV.dev vuln scanning, version-based migration assessment, prism deps CLI (status/audit/unused), /deps REPL, 174 tests |
+| 26. Multi-Model Debate Mode | ENHANCED | 3-round structured debate, DebateConfig/DebateResult/DebateRound dataclasses, generate_report_text, save/list debates, prism debate CLI, /debate REPL, 49+ tests |
+| 27. Temporal Code Archaeologist | ENHANCED | CommitInfo/ArchaeologyReport dataclasses, git blame/log parsing, co-evolution analysis, stability scoring, narrative generation, prism why CLI, /why REPL, 60+ tests |
+| 28. Smart Context Budget Manager | ENHANCED | RelevanceLevel enum, relevance graph with 4 levels, token budget allocation (40/10/50 split), SQLite efficiency tracking, generate_context_display, prism context CLI, /context REPL (show/add/drop/stats), 50+ tests |
 
 ### Phase 6: Production Readiness (COMPLETE)
 | Task | Status | Notes |
@@ -122,12 +122,14 @@
 
 ## Completion Metrics
 - Modules completed: 40+ (all phases complete, enhanced)
-- Tests: 4,079 passing, 15 skipped
-- Test suites: 90+
-- REPL: 33 fully-wired slash commands
+- Tests: 4,699 passing, 15 skipped
+- Test suites: 110+
+- REPL: 36 fully-wired slash commands (+/aei, /blame, /impact)
+- CLI: prism blame, prism impact, prism test-gaps, prism deps, prism debate, prism why, prism context commands added
 - Ruff: 0 errors
 - Bandit: Clean
 - Security: No real API keys in codebase, .gitignore verified
 - Phase 3 enhancements: pricing spec match, health checks, architect mode, web browsing
 - Phase 4 enhancements: all 18 items with full REPL integration
+- Phase 5 enhancements: ALL 10 items enhanced — AEI 9 strategies, blame CLI, arch subcommands, debug memory I/O, blast radius rich report, test gap hunter semantic analysis, deps 7-ecosystem parsing + OSV.dev, debate 3-round structured, archaeologist git analysis, context budget relevance graph
 - GitHub: CI/CD workflows, issue templates, CONTRIBUTING.md, SECURITY.md

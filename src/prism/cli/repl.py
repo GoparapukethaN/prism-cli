@@ -60,6 +60,8 @@ COMMAND_CATEGORIES: dict[str, list[tuple[str, str]]] = {
          "Create / list / switch / merge / delete / save"),
         ("/budget [status|set] [tokens]",
          "Context budget management"),
+        ("/context [show|add|drop|stats] [file]",
+         "Smart context budget allocation"),
     ],
     "Cost & Budget": [
         ("/cost", "Show cost dashboard"),
@@ -74,12 +76,24 @@ COMMAND_CATEGORIES: dict[str, list[tuple[str, str]]] = {
         ("/web on|off", "Toggle web browsing"),
     ],
     "Code Intelligence": [
-        ("/blast <file>", "Blast radius analysis for a file"),
-        ("/gaps [file|dir]", "Test gap analysis"),
-        ("/deps", "Dependency health report"),
-        ("/arch [map|drift]", "Architecture map / drift detection"),
-        ("/debug-memory [search] [query]", "Debug memory search"),
+        ("/blast <file>",
+         "Blast radius / impact analysis (alias: /impact)"),
+        ("/gaps [critical|high|generate]", "Test gap analysis"),
+        ("/deps [status|audit|unused]",
+         "Dependency health, security audit, unused scan"),
+        ("/arch [map|drift|mermaid|check|diff]",
+         "Architecture map / drift / diagram"),
+        ("/debug-memory [stats|search|bugs|forget|"
+         "export|import]",
+         "Debug memory management"),
         ("/history <file>", "Code archaeology — file evolution"),
+        ("/aei [stats|reset|explain]",
+         "AEI statistics, reset, or explain fingerprint"),
+        ("/blame <description>",
+         "Causal blame trace with optional bisect"),
+        ("/why <file:line|func>",
+         "Investigate code history and evolution"),
+        ("/debates", "List saved debate reports"),
     ],
     "Planning": [
         ("/architect <goal>",
@@ -292,6 +306,7 @@ def _dispatch_command(
         "/offline": _cmd_offline,
         "/debate": _cmd_debate,
         "/blast": _cmd_blast,
+        "/impact": _cmd_blast,
         "/gaps": _cmd_gaps,
         "/deps": _cmd_deps,
         "/arch": _cmd_arch,
@@ -300,6 +315,11 @@ def _dispatch_command(
         "/budget": _cmd_budget,
         "/architect": _cmd_architect,
         "/ignore": _cmd_ignore,
+        "/aei": _cmd_aei,
+        "/blame": _cmd_blame,
+        "/context": _cmd_context,
+        "/why": _cmd_why,
+        "/debates": _cmd_debates,
     }
 
     handler = dispatch.get(cmd)
@@ -2586,80 +2606,94 @@ def _cmd_debate(
     settings: Settings,
     **_: Any,
 ) -> str:
-    """Multi-model debate on a question."""
+    """Multi-model debate on a question.
+
+    Supports:
+    - ``/debate <question>`` — full 3-round debate
+    - ``/debate quick <question>`` — skip critique round
+    """
     if not args:
         console.print(
             "[yellow]Usage:[/] /debate <question or decision>\n"
-            "[dim]Runs a structured 3-round debate across "
-            "multiple AI models.[/dim]"
+            "[dim]  /debate quick <question> — skip critique round\n"
+            "  /debates — list saved debates[/dim]"
         )
         return "continue"
 
+    # Check for "quick" prefix
+    quick_mode = False
+    question = args
+    if args.lower().startswith("quick "):
+        quick_mode = True
+        question = args[6:].strip()
+
+    if not question:
+        console.print("[yellow]Please provide a question to debate.[/]")
+        return "continue"
+
     try:
-        from prism.intelligence.debate import MultiModelDebate
-        from prism.llm.completion import CompletionEngine
-
-        engine = CompletionEngine(settings=settings)
-        debate = MultiModelDebate(completion_engine=engine)
-
-        console.print(
-            "[dim]Starting multi-model debate...[/]"
+        from prism.intelligence.debate import (
+            DebateConfig,
+            debate,
         )
 
-        session = asyncio.get_event_loop().run_until_complete(
-            debate.debate(args)
-        )
+        cfg = DebateConfig(quick_mode=quick_mode)
 
-        # Display Round 1 positions
-        console.print("\n[bold]Round 1 — Independent Positions[/bold]")
-        for pos in session.round1_positions:
-            console.print(Panel(
-                Markdown(pos.content) if pos.content else Text(
-                    "(no response)", style="dim"
-                ),
-                title=f"{pos.model}",
-                subtitle=(
-                    f"Tokens: {pos.tokens_used} | "
-                    f"Cost: ${pos.cost_usd:.4f}"
-                ),
-                border_style="blue",
-            ))
+        console.print("[dim]Starting multi-model debate...[/]")
+        if quick_mode:
+            console.print("[dim]Quick mode: skipping critique round.[/]")
 
-        # Display Round 2 critiques if present
-        if session.round2_critiques:
-            console.print(
-                "\n[bold]Round 2 — Critiques[/bold]"
+        result = debate(question=question, config=cfg)
+
+        # Display each round
+        for rnd in result.rounds:
+            round_labels = {
+                "position": ("Round 1 — Independent Positions", "blue"),
+                "critique": ("Round 2 — Critiques", "yellow"),
+                "synthesis": ("Round 3 — Synthesis", "green"),
+            }
+            label, color = round_labels.get(
+                rnd.round_type,
+                (f"Round {rnd.round_number}", "white"),
             )
-            for crit in session.round2_critiques:
+            console.print(f"\n[bold]{label}[/bold]")
+            for model_name, response in rnd.positions.items():
                 console.print(Panel(
-                    Markdown(crit.updated_position)
-                    if crit.updated_position
-                    else Text("(no critique)", style="dim"),
-                    title=f"{crit.model}",
-                    border_style="yellow",
+                    Markdown(response) if response else Text(
+                        "(no response)", style="dim"
+                    ),
+                    title=model_name,
+                    border_style=color,
                 ))
 
-        # Display synthesis
-        if session.synthesis:
-            syn = session.synthesis
-            console.print(
-                "\n[bold]Round 3 — Synthesis[/bold]"
-            )
-            console.print(Panel(
-                Markdown(syn.recommendation)
-                if syn.recommendation
-                else Text("(no synthesis)", style="dim"),
-                title=(
-                    f"Synthesizer: {syn.synthesizer_model} | "
-                    f"Confidence: {syn.confidence:.0%}"
-                ),
-                border_style="green",
-            ))
+        # Synthesis summary
+        console.print("\n[bold]Synthesis Summary[/bold]")
+        summary_parts: list[str] = []
+        if result.consensus:
+            summary_parts.append(f"**Consensus**: {result.consensus}")
+        if result.disagreements:
+            summary_parts.append(f"**Disagreements**: {result.disagreements}")
+        if result.tradeoffs:
+            summary_parts.append(f"**Tradeoffs**: {result.tradeoffs}")
+        if result.recommendation:
+            summary_parts.append(f"**Recommendation**: {result.recommendation}")
+        summary_parts.append(f"**Confidence**: {result.confidence:.0%}")
+
+        if result.blind_spots:
+            summary_parts.append("**Blind Spots**:")
+            for m, spot in result.blind_spots.items():
+                summary_parts.append(f"  - {m}: {spot}")
+
+        console.print(Panel(
+            Markdown("\n\n".join(summary_parts)) if summary_parts else Text(
+                "(no synthesis)", style="dim"
+            ),
+            border_style="green",
+        ))
 
         # Cost summary
         console.print(
-            f"\n[dim]Total cost: ${session.total_cost:.4f} | "
-            f"Total tokens: {session.total_tokens:,}[/dim]"
+            f"\n[dim]Total cost: ${result.total_cost:.4f}[/dim]"
         )
 
     except ValueError as exc:
@@ -2668,6 +2702,204 @@ def _cmd_debate(
         logger.debug("debate_error", error=str(exc))
         console.print(f"[red]Debate error:[/] {exc}")
     return "continue"
+
+
+def _display_blast_report(
+    console: Console,
+    report: Any,
+    analyzer: Any,
+    risk_level_cls: Any,
+) -> None:
+    """Render a detailed blast-radius report to the console.
+
+    Displays a rich-formatted report with header, files grouped by risk
+    level, test recommendations, missing tests with priority labels,
+    execution order, and effort estimate.
+
+    Args:
+        console: Rich console instance for output.
+        report: The :class:`ImpactReport` to display.
+        analyzer: The :class:`BlastRadiusAnalyzer` that produced the report.
+        risk_level_cls: The :class:`RiskLevel` constants class.
+    """
+    complexity_effort: dict[str, str] = {
+        "trivial": "<1 hour",
+        "simple": "1-2 hours",
+        "moderate": "2-4 hours",
+        "complex": "4-8 hours",
+    }
+    approach_map: dict[str, str] = {
+        "complex": "incremental (test-first on critical areas)",
+        "moderate": "incremental (test-first on critical areas)",
+        "simple": "direct",
+        "trivial": "direct",
+    }
+
+    # --- Header panel ---
+    if report.risk_score >= 70:
+        score_style = "red bold"
+        border_style = "red"
+    elif report.risk_score >= 40:
+        score_style = "yellow"
+        border_style = "yellow"
+    else:
+        score_style = "green"
+        border_style = "green"
+
+    header_lines = [
+        f"[bold]Change:[/bold] {report.description}",
+        (
+            f"[bold]Risk Score:[/bold] "
+            f"[{score_style}]{report.risk_score}/100[/{score_style}]"
+        ),
+        f"[bold]Complexity:[/bold] {report.estimated_complexity}",
+        f"[bold]Files Affected:[/bold] {report.file_count}",
+    ]
+    console.print(Panel(
+        "\n".join(header_lines),
+        title="[bold]Blast Radius Report[/bold]",
+        border_style=border_style,
+    ))
+
+    # Group files by risk level
+    high_files = [
+        af for af in report.affected_files
+        if af.risk_level == risk_level_cls.HIGH
+    ]
+    medium_files = [
+        af for af in report.affected_files
+        if af.risk_level == risk_level_cls.MEDIUM
+    ]
+    low_files = [
+        af for af in report.affected_files
+        if af.risk_level == risk_level_cls.LOW
+    ]
+
+    # --- Critical (HIGH) areas ---
+    if high_files:
+        table = Table(
+            title="[red bold]Critical Areas (HIGH risk)[/]",
+            border_style="red",
+        )
+        table.add_column("File", style="cyan")
+        table.add_column("Tests", justify="center")
+        table.add_column("Callers", justify="center")
+        table.add_column("Functions")
+        table.add_column("Reason")
+        for af in high_files:
+            tested = "[green]yes[/]" if af.has_tests else "[red]no[/]"
+            funcs = ", ".join(af.affected_functions[:5]) or "-"
+            if len(af.affected_functions) > 5:
+                funcs += f" (+{len(af.affected_functions) - 5})"
+            table.add_row(
+                af.path,
+                tested,
+                str(len(af.affected_functions)),
+                funcs,
+                af.reason[:50],
+            )
+        console.print(table)
+
+    # --- Medium areas ---
+    if medium_files:
+        table = Table(
+            title="[yellow]Medium Risk Areas[/]",
+            border_style="yellow",
+        )
+        table.add_column("File", style="cyan")
+        table.add_column("Tests", justify="center")
+        table.add_column("Depth", justify="center")
+        table.add_column("Reason")
+        for af in medium_files:
+            tested = "[green]yes[/]" if af.has_tests else "[red]no[/]"
+            table.add_row(
+                af.path, tested, str(af.depth), af.reason[:50],
+            )
+        console.print(table)
+
+    # --- Low areas ---
+    if low_files:
+        table = Table(
+            title="[green]Low Risk Areas[/]",
+            border_style="green",
+        )
+        table.add_column("File", style="cyan")
+        table.add_column("Tests", justify="center")
+        table.add_column("Depth", justify="center")
+        table.add_column("Reason")
+        for af in low_files:
+            tested = "[green]yes[/]" if af.has_tests else "[red]no[/]"
+            table.add_row(
+                af.path, tested, str(af.depth), af.reason[:50],
+            )
+        console.print(table)
+
+    # --- Test recommendations ---
+    if report.recommended_test_order:
+        test_paths = " ".join(report.recommended_test_order)
+        console.print(Panel(
+            f"[bold]Run before changes:[/bold]\n  pytest {test_paths}",
+            title="[bold]Test Recommendations[/bold]",
+            border_style="blue",
+        ))
+
+    # --- Missing tests ---
+    if report.missing_tests:
+        critical_missing = {
+            af.path for af in high_files if not af.has_tests
+        }
+        missing_lines: list[str] = []
+        for mt in report.missing_tests:
+            if mt in critical_missing:
+                missing_lines.append(
+                    f"  [red bold]HIGH PRIORITY[/] {mt}"
+                )
+            else:
+                missing_lines.append(f"  [dim]normal[/dim]       {mt}")
+        console.print(Panel(
+            "\n".join(missing_lines),
+            title=(
+                f"[bold yellow]Missing Tests "
+                f"({len(report.missing_tests)} file(s))[/]"
+            ),
+            border_style="yellow",
+        ))
+
+    # --- Execution order ---
+    if report.execution_order:
+        order_lines = [
+            f"  {idx}. {path}"
+            for idx, path in enumerate(report.execution_order, 1)
+        ]
+        console.print(Panel(
+            "\n".join(order_lines),
+            title="[bold]Recommended Execution Order[/bold]",
+            border_style="dim",
+        ))
+
+    # --- Effort estimate ---
+    effort = complexity_effort.get(
+        report.estimated_complexity, "unknown",
+    )
+    approach = approach_map.get(
+        report.estimated_complexity, "direct",
+    )
+    console.print(Panel(
+        (
+            f"[bold]Complexity:[/bold] {report.estimated_complexity}\n"
+            f"[bold]Estimated effort:[/bold] {effort}\n"
+            f"[bold]Recommended approach:[/bold] {approach}"
+        ),
+        title="[bold]Effort Estimate[/bold]",
+        border_style="dim",
+    ))
+
+    # --- Report path ---
+    report_path = analyzer.last_report_path
+    if report_path:
+        console.print(
+            f"\n[dim]Report saved to {report_path}[/dim]"
+        )
 
 
 def _cmd_blast(
@@ -2686,6 +2918,7 @@ def _cmd_blast(
     try:
         from prism.intelligence.blast_radius import (
             BlastRadiusAnalyzer,
+            RiskLevel,
         )
 
         analyzer = BlastRadiusAnalyzer(
@@ -2693,57 +2926,7 @@ def _cmd_blast(
         )
         report = analyzer.analyze(description=args)
 
-        # Risk score color
-        if report.risk_score >= 70:
-            score_style = "red bold"
-        elif report.risk_score >= 40:
-            score_style = "yellow"
-        else:
-            score_style = "green"
-
-        console.print(
-            f"\n[bold]Blast Radius Analysis[/bold] — "
-            f"[{score_style}]Risk: {report.risk_score}/100"
-            f"[/{score_style}] | "
-            f"Complexity: {report.estimated_complexity}"
-        )
-
-        if report.affected_files:
-            table = Table(title="Affected Files")
-            table.add_column("File", style="cyan")
-            table.add_column("Risk", justify="center")
-            table.add_column("Depth", justify="center")
-            table.add_column("Reason")
-            table.add_column("Tests", justify="center")
-
-            risk_colors = {
-                "high": "red",
-                "medium": "yellow",
-                "low": "green",
-            }
-            for af in report.affected_files:
-                color = risk_colors.get(af.risk_level, "white")
-                tested = (
-                    "[green]yes[/]" if af.has_tests
-                    else "[red]no[/]"
-                )
-                table.add_row(
-                    af.path,
-                    f"[{color}]{af.risk_level.upper()}"
-                    f"[/{color}]",
-                    str(af.depth),
-                    af.reason[:40],
-                    tested,
-                )
-            console.print(table)
-
-        if report.missing_tests:
-            console.print(
-                f"\n[yellow]Missing tests for "
-                f"{len(report.missing_tests)} file(s):[/]"
-            )
-            for f in report.missing_tests[:10]:
-                console.print(f"  {f}")
+        _display_blast_report(console, report, analyzer, RiskLevel)
 
     except Exception as exc:
         logger.debug("blast_error", error=str(exc))
@@ -2757,13 +2940,52 @@ def _cmd_gaps(
     settings: Settings,
     **_: Any,
 ) -> str:
-    """Test gap analysis — find untested code."""
+    """Test gap analysis — find untested code.
+
+    Subcommands:
+        /gaps                — full analysis
+        /gaps critical       — show only critical gaps
+        /gaps high           — show only high gaps
+        /gaps generate       — generate top 5 test stubs
+    """
     try:
-        from prism.intelligence.test_gaps import TestGapHunter
+        from prism.intelligence.test_gaps import GapRisk, TestGapHunter
 
         hunter = TestGapHunter(
             project_root=settings.project_root,
         )
+
+        sub = args.lower().strip()
+
+        # Handle "generate" subcommand
+        if sub == "generate":
+            report = hunter.analyze()
+            gen_gaps = [
+                g for g in report.gaps
+                if g.risk_level in (GapRisk.CRITICAL, GapRisk.HIGH)
+            ]
+            if not gen_gaps:
+                gen_gaps = report.gaps
+            gen_gaps = gen_gaps[:5]
+
+            if not gen_gaps:
+                console.print(
+                    "[green]No test gaps to generate tests for.[/]"
+                )
+                return "continue"
+
+            from pathlib import Path
+
+            generated = hunter.generate_tests(gen_gaps, count=5)
+            for test_path, content in generated.items():
+                out = Path(test_path)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(content)
+                console.print(
+                    f"[green]Generated:[/] {test_path}"
+                )
+            return "continue"
+
         report = hunter.analyze()
 
         # Summary panel
@@ -2783,7 +3005,7 @@ def _cmd_gaps(
 
         # Filter by risk if requested
         gaps = report.gaps
-        filter_level = args.lower().strip()
+        filter_level = sub
         if filter_level in ("critical", "high", "medium", "low"):
             gaps = [g for g in gaps if g.risk_level == filter_level]
             console.print(
@@ -2796,6 +3018,7 @@ def _cmd_gaps(
             table.add_column("File")
             table.add_column("Line", justify="right")
             table.add_column("Risk", justify="center")
+            table.add_column("Scenarios", justify="right")
             table.add_column("Effort")
             table.add_column("Reason")
 
@@ -2814,10 +3037,22 @@ def _cmd_gaps(
                     str(gap.line_number),
                     f"[{color}]{gap.risk_level.upper()}"
                     f"[/{color}]",
+                    str(len(gap.scenarios)),
                     gap.estimated_effort,
                     gap.reason[:40],
                 )
             console.print(table)
+
+            # Show scenarios for each gap
+            for gap in gaps[:30]:
+                if gap.scenarios:
+                    console.print(
+                        f"  [dim]{gap.function_name}:[/dim]"
+                    )
+                    for scenario in gap.scenarios:
+                        console.print(
+                            f"    [dim]- {scenario}[/dim]"
+                        )
 
             if len(report.gaps) > 30:
                 console.print(
@@ -2841,82 +3076,27 @@ def _cmd_deps(
     settings: Settings,
     **_: Any,
 ) -> str:
-    """Dependency health report."""
+    """Dependency health report with sub-actions: status, audit, unused."""
     try:
         from prism.intelligence.deps import DependencyMonitor
 
         monitor = DependencyMonitor(
             project_root=settings.project_root,
         )
-        report = monitor.get_status()
 
-        # Summary
-        console.print(Panel(
-            f"Total: {report.total_deps} | "
-            f"Outdated: {report.outdated} | "
-            f"Vulnerable: {report.vulnerable} | "
-            f"Unused: {report.unused}",
-            title="[bold]Dependency Health[/bold]",
-            border_style="blue",
-        ))
+        sub = args.lower().strip() if args else "status"
 
-        # Dependencies table
-        if report.dependencies:
-            table = Table(title="Dependencies")
-            table.add_column("Package", style="cyan")
-            table.add_column("Current")
-            table.add_column("Ecosystem")
-            table.add_column("Usages", justify="right")
-            table.add_column("Migration")
-
-            for dep in report.dependencies[:30]:
-                mig_color = {
-                    "trivial": "green",
-                    "simple": "yellow",
-                    "moderate": "yellow bold",
-                    "complex": "red",
-                }.get(dep.migration_complexity.value, "white")
-                table.add_row(
-                    dep.name,
-                    dep.current_version,
-                    dep.ecosystem,
-                    str(dep.usages),
-                    f"[{mig_color}]"
-                    f"{dep.migration_complexity.value}"
-                    f"[/{mig_color}]",
-                )
-            console.print(table)
-
-        # Vulnerabilities
-        if report.vulnerabilities:
-            vuln_table = Table(
-                title="Vulnerabilities",
-                border_style="red",
-            )
-            vuln_table.add_column(
-                "Package", style="red bold"
-            )
-            vuln_table.add_column("CVE")
-            vuln_table.add_column("Severity")
-            vuln_table.add_column("Fix Version")
-
-            for v in report.vulnerabilities:
-                vuln_table.add_row(
-                    v.package,
-                    v.cve_id,
-                    v.severity.value.upper(),
-                    v.fixed_version or "-",
-                )
-            console.print(vuln_table)
-
-        # Unused
-        if report.unused_deps:
+        if sub in ("", "status"):
+            _repl_deps_status(monitor, console)
+        elif sub == "audit":
+            _repl_deps_audit(monitor, console)
+        elif sub == "unused":
+            _repl_deps_unused(monitor, console)
+        else:
             console.print(
-                f"\n[yellow]Potentially unused "
-                f"({len(report.unused_deps)}):[/]"
+                f"[yellow]Unknown deps sub-command:[/] {sub}\n"
+                "[dim]Usage: /deps [status|audit|unused][/dim]"
             )
-            for name in report.unused_deps:
-                console.print(f"  {name}")
 
     except ValueError as exc:
         console.print(f"[yellow]{exc}[/]")
@@ -2924,6 +3104,152 @@ def _cmd_deps(
         logger.debug("deps_error", error=str(exc))
         console.print(f"[red]Deps error:[/] {exc}")
     return "continue"
+
+
+def _repl_deps_status(
+    monitor: Any,
+    console: Console,
+) -> None:
+    """Display full dependency status table in the REPL."""
+    report = monitor.get_status()
+
+    console.print(Panel(
+        f"Total: {report.total_deps} | "
+        f"Outdated: {report.outdated} | "
+        f"Vulnerable: {report.vulnerable} | "
+        f"Unused: {report.unused}",
+        title="[bold]Dependency Health[/bold]",
+        border_style="blue",
+    ))
+
+    if report.dependencies:
+        table = Table(title="Dependencies")
+        table.add_column("Package", style="cyan")
+        table.add_column("Current")
+        table.add_column("Latest")
+        table.add_column("Ecosystem")
+        table.add_column("Security")
+        table.add_column("Risk")
+
+        vuln_packages = {v.package for v in report.vulnerabilities}
+
+        for dep in report.dependencies[:50]:
+            mig_color = {
+                "trivial": "green",
+                "simple": "yellow",
+                "moderate": "yellow bold",
+                "complex": "red",
+            }.get(dep.migration_complexity.value, "white")
+
+            security = (
+                "[red]VULNERABLE[/red]"
+                if dep.name in vuln_packages
+                else "[green]OK[/green]"
+            )
+
+            table.add_row(
+                dep.name,
+                dep.current_version,
+                dep.latest_version or "-",
+                dep.ecosystem,
+                security,
+                f"[{mig_color}]"
+                f"{dep.migration_complexity.value}"
+                f"[/{mig_color}]",
+            )
+        console.print(table)
+
+    if report.vulnerabilities:
+        vuln_table = Table(
+            title="Vulnerabilities",
+            border_style="red",
+        )
+        vuln_table.add_column(
+            "Package", style="red bold"
+        )
+        vuln_table.add_column("CVE")
+        vuln_table.add_column("Severity")
+        vuln_table.add_column("Fix Version")
+
+        for v in report.vulnerabilities:
+            vuln_table.add_row(
+                v.package,
+                v.cve_id,
+                v.severity.value.upper(),
+                v.fixed_version or "-",
+            )
+        console.print(vuln_table)
+
+    if report.unused_deps:
+        console.print(
+            f"\n[yellow]Potentially unused "
+            f"({len(report.unused_deps)}):[/]"
+        )
+        for name in report.unused_deps:
+            console.print(f"  {name}")
+
+
+def _repl_deps_audit(
+    monitor: Any,
+    console: Console,
+) -> None:
+    """Display security-only audit in the REPL."""
+    report = monitor.get_status()
+
+    if not report.vulnerabilities:
+        console.print("[green]No vulnerabilities found.[/green]")
+        return
+
+    vuln_table = Table(
+        title="Security Audit Results",
+        border_style="red",
+    )
+    vuln_table.add_column("Package", style="red bold")
+    vuln_table.add_column("CVE")
+    vuln_table.add_column("Severity")
+    vuln_table.add_column("Current")
+    vuln_table.add_column("Fix Version")
+
+    for v in report.vulnerabilities:
+        vuln_table.add_row(
+            v.package,
+            v.cve_id,
+            v.severity.value.upper(),
+            v.current_version,
+            v.fixed_version or "-",
+        )
+
+    console.print(vuln_table)
+    console.print(
+        f"\n[bold]Total vulnerabilities:[/] "
+        f"{len(report.vulnerabilities)}"
+    )
+
+
+def _repl_deps_unused(
+    monitor: Any,
+    console: Console,
+) -> None:
+    """Display unused dependencies in the REPL."""
+    report = monitor.get_status()
+
+    if not report.unused_deps:
+        console.print(
+            "[green]No unused dependencies detected.[/green]"
+        )
+        return
+
+    console.print(
+        f"\n[yellow]Potentially unused dependencies "
+        f"({len(report.unused_deps)}):[/yellow]\n"
+    )
+    for name in report.unused_deps:
+        console.print(f"  [dim]-[/dim] {name}")
+
+    console.print(
+        "\n[dim]Note: Build tools and test runners "
+        "are excluded from this check.[/dim]"
+    )
 
 
 def _cmd_arch(
@@ -2976,6 +3302,54 @@ def _cmd_arch(
                     v.description[:50],
                 )
             console.print(table)
+
+        elif sub == "mermaid":
+            state = mapper.generate()
+            mermaid = mapper.generate_mermaid(state)
+            console.print(Panel(
+                mermaid,
+                title="[bold]Mermaid Dependency Diagram[/bold]",
+                border_style="cyan",
+            ))
+
+        elif sub == "check":
+            current = mapper.generate()
+            violations = mapper.detect_drift(current)
+            boundary_violations = [
+                v for v in violations
+                if v.violation_type == "boundary_crossing"
+            ]
+
+            if not boundary_violations:
+                console.print(
+                    "[green]No boundary violations detected.[/]"
+                )
+                return "continue"
+
+            table = Table(
+                title="Boundary Violations",
+            )
+            table.add_column("Source", style="cyan")
+            table.add_column("Target", style="red")
+            table.add_column("Severity", justify="center")
+            table.add_column("Description")
+
+            for v in boundary_violations:
+                table.add_row(
+                    v.source,
+                    v.target or "-",
+                    f"[red]{v.severity.upper()}[/red]",
+                    v.description[:60],
+                )
+            console.print(table)
+
+        elif sub == "diff":
+            diff_text = mapper.get_diff()
+            console.print(Panel(
+                diff_text,
+                title="[bold]Architecture Diff[/bold]",
+                border_style="yellow",
+            ))
 
         else:
             # map (default)
@@ -3030,7 +3404,13 @@ def _cmd_debug_memory(
 ) -> str:
     """Debug memory — search past bug fixes."""
     try:
-        from prism.intelligence.debug_memory import DebugMemory
+        import json as _json
+        from pathlib import Path as _Path
+
+        from prism.intelligence.debug_memory import (
+            BugFingerprint,
+            DebugMemory,
+        )
 
         db_path = settings.prism_home / "debug_memory.db"
         memory = DebugMemory(db_path=db_path)
@@ -3064,6 +3444,209 @@ def _cmd_debug_memory(
                     f"{r.confidence:.0%}",
                 )
             console.print(table)
+
+        elif sub in ("bugs", "list"):
+            records = memory.browse_fixes(limit=100)
+            if not records:
+                console.print(
+                    "[dim]No fixes stored yet.[/dim]"
+                )
+                memory.close()
+                return "continue"
+
+            table = Table(title="All Stored Fixes")
+            table.add_column("ID", style="dim", width=5)
+            table.add_column("Error Type", style="red")
+            table.add_column("Fix Pattern")
+            table.add_column("Project")
+            table.add_column("Date", width=10)
+
+            for r in records:
+                table.add_row(
+                    str(r.id),
+                    r.error_type,
+                    r.fix_pattern[:40],
+                    r.project,
+                    r.timestamp[:10],
+                )
+            console.print(table)
+
+        elif sub == "forget" and query:
+            fix_id = query.strip()
+            try:
+                deleted = memory.forget(int(fix_id))
+            except ValueError:
+                console.print(
+                    f"[red]Invalid fix ID:[/] {fix_id}"
+                )
+                memory.close()
+                return "continue"
+
+            if deleted:
+                console.print(
+                    f"[green]Fix #{fix_id} deleted.[/]"
+                )
+            else:
+                console.print(
+                    f"[yellow]Fix #{fix_id} not found.[/]"
+                )
+
+        elif sub == "export":
+            records = memory.browse_fixes(limit=10000)
+            export_path = (
+                settings.prism_home
+                / "debug_memory_export.json"
+            )
+            export_data = [
+                {
+                    "id": r.id,
+                    "fingerprint": r.fingerprint,
+                    "error_type": r.error_type,
+                    "stack_pattern": r.stack_pattern,
+                    "fix_pattern": r.fix_pattern,
+                    "fix_diff": r.fix_diff,
+                    "confidence": r.confidence,
+                    "project": r.project,
+                    "model_used": r.model_used,
+                    "timestamp": r.timestamp,
+                    "language": r.language,
+                    "framework": r.framework,
+                    "affected_files_json": (
+                        r.affected_files_json
+                    ),
+                    "affected_functions_json": (
+                        r.affected_functions_json
+                    ),
+                }
+                for r in records
+            ]
+            export_path.parent.mkdir(
+                parents=True, exist_ok=True,
+            )
+            export_path.write_text(
+                _json.dumps(export_data, indent=2),
+                encoding="utf-8",
+            )
+            console.print(
+                f"[green]Exported {len(records)} fixes to "
+                f"{export_path}[/]"
+            )
+
+        elif sub == "import" and query:
+            import_path = _Path(query).expanduser().resolve()
+            if not import_path.is_file():
+                console.print(
+                    f"[red]File not found:[/] {import_path}"
+                )
+                memory.close()
+                return "continue"
+
+            try:
+                raw = import_path.read_text(encoding="utf-8")
+                data = _json.loads(raw)
+            except (
+                _json.JSONDecodeError, OSError,
+            ) as err:
+                console.print(
+                    f"[red]Import error:[/] {err}"
+                )
+                memory.close()
+                return "continue"
+
+            if not isinstance(data, list):
+                console.print(
+                    "[red]Invalid format: expected a JSON "
+                    "array of fix records.[/]"
+                )
+                memory.close()
+                return "continue"
+
+            imported = 0
+            for entry in data:
+                try:
+                    affected_files: list[str] = (
+                        _json.loads(
+                            entry.get(
+                                "affected_files_json",
+                                "[]",
+                            ),
+                        )
+                        if isinstance(
+                            entry.get(
+                                "affected_files_json"
+                            ),
+                            str,
+                        )
+                        else entry.get(
+                            "affected_files_json", []
+                        )
+                    )
+                    affected_fns: list[str] = (
+                        _json.loads(
+                            entry.get(
+                                "affected_functions_json",
+                                "[]",
+                            ),
+                        )
+                        if isinstance(
+                            entry.get(
+                                "affected_functions_json",
+                            ),
+                            str,
+                        )
+                        else entry.get(
+                            "affected_functions_json", []
+                        )
+                    )
+                    fp = BugFingerprint(
+                        error_type=entry.get(
+                            "error_type", "Unknown"
+                        ),
+                        stack_pattern=entry.get(
+                            "stack_pattern", ""
+                        ),
+                        affected_files=affected_files,
+                        affected_functions=affected_fns,
+                        language=entry.get(
+                            "language", ""
+                        ),
+                        framework=entry.get(
+                            "framework", ""
+                        ),
+                        fingerprint_hash=entry.get(
+                            "fingerprint", ""
+                        ),
+                    )
+                    memory.store_fix(
+                        fingerprint=fp,
+                        fix_pattern=entry.get(
+                            "fix_pattern", ""
+                        ),
+                        fix_diff=entry.get(
+                            "fix_diff", ""
+                        ),
+                        project=entry.get("project", ""),
+                        model_used=entry.get(
+                            "model_used", ""
+                        ),
+                        confidence=float(
+                            entry.get("confidence", 0.5)
+                        ),
+                    )
+                    imported += 1
+                except (
+                    KeyError, TypeError, ValueError,
+                ) as err:
+                    logger.debug(
+                        "debug_memory.import_skip",
+                        error=str(err),
+                    )
+                    continue
+
+            console.print(
+                f"[green]Imported {imported} fixes from "
+                f"{import_path}[/]"
+            )
 
         else:
             # stats (default)
@@ -3578,6 +4161,575 @@ def _cmd_ignore(
         "[dim]Subcommands: list, add <pattern>, "
         "check <file>, create[/dim]"
     )
+    return "continue"
+
+
+def _cmd_aei(
+    args: str,
+    console: Console,
+    settings: Settings,
+    **_: Any,
+) -> str:
+    """AEI statistics, reset, or explain a specific fingerprint.
+
+    Subcommands:
+        ``/aei`` or ``/aei stats`` -- show aggregate statistics.
+        ``/aei reset`` -- clear all attempt history.
+        ``/aei explain <hash>`` -- explain reasoning for a fingerprint.
+    """
+    try:
+        from prism.intelligence.aei import (
+            AdaptiveExecutionIntelligence,
+            ErrorFingerprint,
+        )
+
+        db_path = settings.prism_home / "aei" / "attempts.db"
+        aei = AdaptiveExecutionIntelligence(
+            db_path=db_path,
+            repo=str(settings.project_root),
+        )
+
+        sub = args.strip()
+        sub_lower = sub.lower()
+
+        # --- /aei reset ---
+        if sub_lower == "reset":
+            deleted = aei.reset()
+            aei.close()
+            console.print(
+                f"[green]AEI history cleared: "
+                f"{deleted} attempt(s) removed.[/]"
+            )
+            return "continue"
+
+        # --- /aei explain <hash> ---
+        if sub_lower.startswith("explain"):
+            fp_hash = sub[len("explain"):].strip()
+            if not fp_hash:
+                aei.close()
+                console.print(
+                    "[yellow]Usage:[/] /aei explain <fingerprint_hash>"
+                )
+                return "continue"
+
+            fp = ErrorFingerprint(
+                error_type="",
+                stack_pattern="",
+                file_path="",
+                function_name="",
+                fingerprint_hash=fp_hash,
+            )
+            explanation = aei.explain(fp)
+            aei.close()
+            console.print(Panel(
+                explanation,
+                title="[bold]AEI Explanation[/bold]",
+                border_style="blue",
+            ))
+            return "continue"
+
+        # --- /aei stats (default) ---
+        stats = aei.get_stats()
+        aei.close()
+
+        table = Table(
+            title="AEI Statistics",
+            show_header=False,
+            box=None,
+            padding=(0, 2),
+        )
+        table.add_column("Metric", style="bold")
+        table.add_column("Value", justify="right")
+
+        table.add_row(
+            "Total attempts", str(stats.total_attempts),
+        )
+        table.add_row(
+            "Successes", str(stats.total_successes),
+        )
+        table.add_row(
+            "Failures", str(stats.total_failures),
+        )
+        table.add_row(
+            "Success rate",
+            f"{stats.success_rate:.1%}",
+        )
+        table.add_row(
+            "Escalation count",
+            str(stats.escalation_count),
+        )
+
+        if stats.strategies_used:
+            strat_parts: list[str] = []
+            for name, count in sorted(
+                stats.strategies_used.items(),
+                key=lambda x: x[1],
+                reverse=True,
+            ):
+                strat_parts.append(f"{name}: {count}")
+            table.add_row(
+                "Strategies used",
+                ", ".join(strat_parts),
+            )
+
+        if stats.top_error_types:
+            err_parts: list[str] = []
+            for etype, count in stats.top_error_types[:5]:
+                err_parts.append(f"{etype}: {count}")
+            table.add_row(
+                "Top error types",
+                ", ".join(err_parts),
+            )
+
+        console.print(Panel(table, border_style="blue"))
+
+    except Exception as exc:
+        logger.debug("aei_command_error", error=str(exc))
+        console.print(f"[red]AEI error:[/] {exc}")
+    return "continue"
+
+
+def _cmd_blame(
+    args: str,
+    console: Console,
+    settings: Settings,
+    **_: Any,
+) -> str:
+    """Causal blame trace with optional git bisect.
+
+    Subcommands:
+        ``/blame <description>`` -- run a blame trace.
+        ``/blame --test "cmd" --good abc123 <description>``
+            -- run with bisect.
+        ``/blame list`` -- list saved blame reports.
+    """
+    if not args:
+        console.print(
+            "[yellow]Usage:[/] /blame <description> | "
+            "/blame --test \"cmd\" --good abc123 <desc> | "
+            "/blame list"
+        )
+        return "continue"
+
+    try:
+        from prism.intelligence.blame import CausalBlameTracer
+
+        tracer = CausalBlameTracer(
+            project_root=settings.project_root,
+        )
+
+        sub_lower = args.strip().lower()
+
+        # --- /blame list ---
+        if sub_lower == "list":
+            reports = tracer.list_reports()
+            if not reports:
+                console.print(
+                    "[dim]No blame reports found.[/dim]"
+                )
+                return "continue"
+
+            table = Table(title="Blame Reports")
+            table.add_column("#", style="dim", width=4)
+            table.add_column("Commit", style="cyan", width=10)
+            table.add_column("Date")
+            table.add_column("Bug Description")
+            table.add_column("Confidence", justify="right")
+
+            for i, report_path in enumerate(reports[:20], 1):
+                report = tracer.load_report(report_path)
+                table.add_row(
+                    str(i),
+                    report.breaking_commit[:8],
+                    report.created_at[:10],
+                    report.bug_description[:50],
+                    f"{report.confidence:.0%}",
+                )
+
+            console.print(table)
+            return "continue"
+
+        # --- Parse --test and --good flags ---
+        test_command: str | None = None
+        good_commit: str | None = None
+        remaining = args.strip()
+
+        if "--test" in remaining:
+            import shlex
+
+            parts = shlex.split(remaining)
+            cleaned_parts: list[str] = []
+            i = 0
+            while i < len(parts):
+                if parts[i] == "--test" and i + 1 < len(parts):
+                    test_command = parts[i + 1]
+                    i += 2
+                elif parts[i] == "--good" and i + 1 < len(parts):
+                    good_commit = parts[i + 1]
+                    i += 2
+                else:
+                    cleaned_parts.append(parts[i])
+                    i += 1
+            remaining = " ".join(cleaned_parts)
+
+        if not remaining:
+            console.print(
+                "[yellow]Please provide a bug description.[/]"
+            )
+            return "continue"
+
+        console.print(
+            "[dim]Running blame trace...[/dim]"
+        )
+        report = tracer.trace(
+            bug_description=remaining,
+            test_command=test_command,
+            good_commit=good_commit,
+        )
+
+        # Display the report
+        confidence_color = (
+            "green" if report.confidence >= 0.7
+            else "yellow" if report.confidence >= 0.4
+            else "red"
+        )
+
+        summary_lines = [
+            f"Breaking commit: {report.breaking_commit[:12]}",
+            f"Author: {report.breaking_author}",
+            f"Date: {report.breaking_date}",
+            f"Message: {report.breaking_message}",
+        ]
+
+        if report.bisect_steps > 0:
+            summary_lines.append(
+                f"Bisect steps: {report.bisect_steps}"
+            )
+
+        console.print(Panel(
+            "\n".join(summary_lines),
+            title="[bold]Blame Report[/bold]",
+            border_style="blue",
+        ))
+
+        if report.affected_files:
+            file_table = Table(title="Affected Files")
+            file_table.add_column("File", style="cyan")
+            for af in report.affected_files[:20]:
+                file_table.add_row(af)
+            console.print(file_table)
+
+        if report.causal_narrative:
+            console.print(Panel(
+                report.causal_narrative,
+                title="[bold]Causal Narrative[/bold]",
+                border_style="yellow",
+            ))
+
+        console.print(
+            f"[{confidence_color}]Confidence: "
+            f"{report.confidence:.0%}[/{confidence_color}]"
+        )
+
+        if report.related_tests:
+            console.print(
+                f"\n[dim]Related tests: "
+                f"{', '.join(report.related_tests[:5])}[/dim]"
+            )
+
+    except Exception as exc:
+        logger.debug("blame_error", error=str(exc))
+        console.print(f"[red]Blame error:[/] {exc}")
+    return "continue"
+
+
+def _cmd_context(
+    args: str,
+    console: Console,
+    settings: Settings,
+    state: _SessionState,
+    **_: Any,
+) -> str:
+    """Smart context budget allocation.
+
+    Subcommands:
+        ``/context``          -- show current context allocation.
+        ``/context show``     -- show current context allocation.
+        ``/context add <f>``  -- force-include a file.
+        ``/context drop <f>`` -- force-exclude a file.
+        ``/context stats``    -- show efficiency metrics.
+    """
+    try:
+        from prism.intelligence.context_budget import (
+            SmartContextBudgetManager,
+        )
+
+        parts = args.split(maxsplit=1)
+        sub = parts[0].lower() if parts else "show"
+        extra = parts[1].strip() if len(parts) > 1 else ""
+
+        manager = SmartContextBudgetManager(
+            project_root=settings.project_root,
+        )
+
+        if sub == "add":
+            if not extra:
+                console.print(
+                    "[yellow]Usage:[/] /context add <file>"
+                )
+                return "continue"
+            manager.add_file(extra)
+            if extra not in state.active_files:
+                state.active_files.append(extra)
+            console.print(
+                f"[green]Force-included:[/] {extra} "
+                "(score set to 1.0)"
+            )
+            return "continue"
+
+        if sub == "drop":
+            if not extra:
+                console.print(
+                    "[yellow]Usage:[/] /context drop <file>"
+                )
+                return "continue"
+            manager.drop_file(extra)
+            if extra in state.active_files:
+                state.active_files.remove(extra)
+            console.print(
+                f"[red]Force-excluded:[/] {extra} "
+                "(score set to 0.0)"
+            )
+            return "continue"
+
+        if sub == "stats":
+            try:
+                from prism.db.database import Database
+
+                db = Database(settings.db_path)
+                stats_manager = SmartContextBudgetManager(
+                    project_root=settings.project_root,
+                    db=db,
+                )
+                stats = stats_manager.get_efficiency_stats()
+
+                table = Table(
+                    show_header=False, box=None,
+                    padding=(0, 2),
+                )
+                table.add_column("Key", style="bold")
+                table.add_column("Value", justify="right")
+
+                table.add_row(
+                    "Total records",
+                    str(stats.total_records),
+                )
+                table.add_row(
+                    "Avg tokens used",
+                    f"{stats.avg_tokens_used:,.0f}",
+                )
+                table.add_row(
+                    "Avg efficiency",
+                    f"{stats.avg_efficiency_pct:.1f}%",
+                )
+                table.add_row(
+                    "Success rate",
+                    f"{stats.success_rate:.0%}",
+                )
+                table.add_row(
+                    "Est. tokens saved",
+                    f"{stats.total_tokens_saved:,}",
+                )
+
+                console.print(Panel(
+                    table,
+                    title="[bold]Context Efficiency Stats[/bold]",
+                    border_style="blue",
+                ))
+            except Exception as exc:
+                logger.debug(
+                    "context_stats_error", error=str(exc),
+                )
+                console.print(
+                    "[dim]No efficiency data yet.[/dim]"
+                )
+            return "continue"
+
+        # show (default)
+        allocation = manager.allocate(
+            task_description="current session context",
+            available_files=list(state.active_files),
+        )
+        display = SmartContextBudgetManager.generate_context_display(
+            allocation,
+        )
+        console.print(Panel(
+            display,
+            title="[bold]Smart Context Budget[/bold]",
+            border_style="blue",
+        ))
+
+    except Exception as exc:
+        logger.debug("context_error", error=str(exc))
+        console.print(f"[red]Context error:[/] {exc}")
+    return "continue"
+
+
+# ======================================================================
+# /why — Code archaeology investigation
+# ======================================================================
+
+
+def _cmd_why(
+    args: str,
+    console: Console,
+    settings: Settings,
+    **_: Any,
+) -> str:
+    """Investigate code history and evolution — temporal archaeology."""
+    if not args:
+        console.print(
+            "[yellow]Usage:[/] /why <file_path[:line]> or "
+            "/why <function_name>\n"
+            "[dim]Investigate why code looks the way it does.[/dim]"
+        )
+        return "continue"
+
+    try:
+        from prism.intelligence.archaeologist import (
+            investigate,
+        )
+
+        console.print("[dim]Investigating code history...[/dim]")
+
+        report = investigate(
+            target=args,
+            project_root=settings.project_root,
+        )
+
+        # Summary panel
+        stability_color = (
+            "green" if report.stability_score >= 0.7
+            else "yellow" if report.stability_score >= 0.4
+            else "red"
+        )
+
+        console.print(Panel(
+            f"Target: {report.target}\n"
+            f"Primary Author: {report.primary_author}\n"
+            f"Total Commits: {len(report.timeline)}\n"
+            f"Stability: [{stability_color}]"
+            f"{report.stability_score:.0%}"
+            f"[/{stability_color}]",
+            title="[bold]Code Archaeology[/bold]",
+            border_style="blue",
+        ))
+
+        # Timeline table
+        if report.timeline:
+            table = Table(title="Timeline")
+            table.add_column("Hash", style="cyan", width=9)
+            table.add_column("Date")
+            table.add_column("Author")
+            table.add_column("Subject")
+
+            for commit in report.timeline[:20]:
+                table.add_row(
+                    commit.hash[:7],
+                    commit.date[:10],
+                    commit.author,
+                    commit.subject[:50],
+                )
+            if len(report.timeline) > 20:
+                console.print(
+                    f"[dim]... and {len(report.timeline) - 20} more[/dim]"
+                )
+            console.print(table)
+
+        # Author distribution
+        if report.author_distribution:
+            auth_table = Table(title="Contributors")
+            auth_table.add_column("Author", style="cyan")
+            auth_table.add_column("Commits", justify="right")
+
+            for author, count in sorted(
+                report.author_distribution.items(),
+                key=lambda x: x[1],
+                reverse=True,
+            ):
+                auth_table.add_row(author, str(count))
+            console.print(auth_table)
+
+        # Co-evolution
+        if report.co_evolution:
+            co_table = Table(title="Co-evolving Files")
+            co_table.add_column("File", style="cyan")
+            co_table.add_column("Co-change Rate", justify="right")
+
+            for co_file, pct in report.co_evolution[:10]:
+                co_table.add_row(co_file, f"{pct:.0%}")
+            console.print(co_table)
+
+        # Risks
+        if report.risks:
+            risk_text = "\n".join(f"- {r}" for r in report.risks)
+            console.print(Panel(
+                risk_text,
+                title="Risks",
+                border_style="red" if report.stability_score < 0.5 else "yellow",
+            ))
+
+    except ValueError as exc:
+        console.print(f"[yellow]{exc}[/]")
+    except Exception as exc:
+        logger.debug("why_error", error=str(exc))
+        console.print(f"[red]Archaeology error:[/] {exc}")
+    return "continue"
+
+
+# ======================================================================
+# /debates — List saved debate reports
+# ======================================================================
+
+
+def _cmd_debates(
+    args: str,
+    console: Console,
+    **_: Any,
+) -> str:
+    """List all saved debate reports."""
+    try:
+        from prism.intelligence.debate import list_debates
+
+        debates = list_debates()
+
+        if not debates:
+            console.print("[dim]No saved debates found.[/dim]")
+            return "continue"
+
+        table = Table(title="Saved Debates")
+        table.add_column("File", style="cyan")
+        table.add_column("Size", justify="right")
+
+        for debate_path in debates[:20]:
+            size = debate_path.stat().st_size
+            size_str = (
+                f"{size / 1024:.1f} KB"
+                if size > 1024
+                else f"{size} B"
+            )
+            table.add_row(debate_path.name, size_str)
+
+        console.print(table)
+
+        if len(debates) > 20:
+            console.print(
+                f"[dim]... and {len(debates) - 20} more[/dim]"
+            )
+
+    except Exception as exc:
+        logger.debug("debates_list_error", error=str(exc))
+        console.print(f"[red]Error listing debates:[/] {exc}")
     return "continue"
 
 

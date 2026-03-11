@@ -43,8 +43,10 @@ class FixStrategy(Enum):
     AST_DIFF = "ast_diff"
     FULL_REWRITE = "full_rewrite"
     CONTEXT_EXPAND = "context_expand"
+    ADD_DEFENSIVE_CODE = "add_defensive_code"
     MODEL_ESCALATE = "model_escalate"
     DECOMPOSE_SUBTASKS = "decompose_subtasks"
+    REVERT_AND_REDESIGN = "revert_and_redesign"
     MULTI_MODEL_DEBATE = "multi_model_debate"
 
 
@@ -53,8 +55,10 @@ STRATEGY_ORDER: list[FixStrategy] = [
     FixStrategy.AST_DIFF,
     FixStrategy.FULL_REWRITE,
     FixStrategy.CONTEXT_EXPAND,
+    FixStrategy.ADD_DEFENSIVE_CODE,
     FixStrategy.MODEL_ESCALATE,
     FixStrategy.DECOMPOSE_SUBTASKS,
+    FixStrategy.REVERT_AND_REDESIGN,
     FixStrategy.MULTI_MODEL_DEBATE,
 ]
 
@@ -480,6 +484,9 @@ class AdaptiveExecutionIntelligence:
                 "All strategies exhausted -> Multi-Model Debate"
             )
 
+        # --- Context and strategy-specific escalation ---
+        context_mult = 1.0
+
         # Specific regex -> AST escalation
         if (
             strategy_failures.get(FixStrategy.REGEX_PATCH.value, 0)
@@ -491,8 +498,34 @@ class AdaptiveExecutionIntelligence:
                 f"{ESCALATION_THRESHOLD} regex failures -> switching to AST diff"
             )
 
-        # --- Context expansion ---
-        context_mult = 1.0
+        # Full-rewrite exhaustion -> add_defensive_code (with context expansion)
+        if (
+            strategy_failures.get(FixStrategy.FULL_REWRITE.value, 0)
+            >= ESCALATION_THRESHOLD
+            and strategy_failures.get(FixStrategy.ADD_DEFENSIVE_CODE.value, 0)
+            < ESCALATION_THRESHOLD
+        ):
+            strategy = FixStrategy.ADD_DEFENSIVE_CODE
+            context_mult = max(context_mult, 2.0)
+            reasoning_parts.append(
+                f"{ESCALATION_THRESHOLD} full_rewrite failures "
+                "-> context_expand + add_defensive_code"
+            )
+
+        # Decompose exhaustion -> revert_and_redesign before debate
+        if (
+            strategy_failures.get(FixStrategy.DECOMPOSE_SUBTASKS.value, 0)
+            >= ESCALATION_THRESHOLD
+            and strategy_failures.get(FixStrategy.REVERT_AND_REDESIGN.value, 0)
+            < ESCALATION_THRESHOLD
+        ):
+            strategy = FixStrategy.REVERT_AND_REDESIGN
+            reasoning_parts.append(
+                f"{ESCALATION_THRESHOLD} decompose failures "
+                "-> revert_and_redesign before multi_model_debate"
+            )
+
+        # Small-context expansion
         context_failures = sum(
             1
             for f in failures
@@ -683,6 +716,78 @@ class AdaptiveExecutionIntelligence:
         deleted = cursor.rowcount
         logger.info("aei_reset", repo=repo, deleted=deleted)
         return deleted
+
+    # ------------------------------------------------------------------
+    # Explanation
+    # ------------------------------------------------------------------
+
+    def explain(self, fingerprint: ErrorFingerprint) -> str:
+        """Return a human-readable explanation of the AEI's reasoning.
+
+        Builds a multi-line narrative covering past attempt history,
+        success/failure breakdown, the sequence of strategies tried,
+        the current recommendation, and the confidence level.
+
+        Args:
+            fingerprint: The error fingerprint to explain.
+
+        Returns:
+            A multi-line string suitable for display in a Rich panel
+            or plain terminal.
+        """
+        attempts = self.get_past_attempts(fingerprint)
+        recommendation = self.recommend_strategy(fingerprint)
+
+        successes = [a for a in attempts if a.outcome == "success"]
+        failures = [a for a in attempts if a.outcome == "failure"]
+
+        strategy_history: list[str] = []
+        seen: set[str] = set()
+        for a in reversed(attempts):
+            label = f"{a.strategy} ({a.outcome})"
+            if label not in seen:
+                strategy_history.append(label)
+                seen.add(label)
+
+        lines: list[str] = [
+            f"Error fingerprint: {fingerprint.fingerprint_hash}",
+            f"Error type: {fingerprint.error_type}",
+            f"File: {fingerprint.file_path}",
+            f"Function: {fingerprint.function_name}",
+            "",
+            f"Past attempts: {len(attempts)}",
+            f"  Successes: {len(successes)}",
+            f"  Failures: {len(failures)}",
+        ]
+
+        if strategy_history:
+            lines.append("")
+            lines.append("Strategy history:")
+            for entry in strategy_history:
+                lines.append(f"  - {entry}")
+
+        lines.append("")
+        lines.append(
+            f"Current recommendation: {recommendation.strategy.value}"
+        )
+        lines.append(f"  Model tier: {recommendation.model_tier}")
+        lines.append(
+            f"  Context multiplier: {recommendation.context_multiplier}x"
+        )
+        lines.append(f"  Reasoning: {recommendation.reasoning}")
+
+        confidence_pct = f"{recommendation.confidence:.0%}"
+        if recommendation.confidence >= 0.7:
+            level = "high"
+        elif recommendation.confidence >= 0.4:
+            level = "moderate"
+        else:
+            level = "low"
+        lines.append(
+            f"  Confidence: {confidence_pct} ({level})"
+        )
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Helpers

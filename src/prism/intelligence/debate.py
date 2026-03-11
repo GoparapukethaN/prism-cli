@@ -15,20 +15,21 @@ Slash-command hooks:
     /debate <question>            — full three-round debate
     /debate --quick <question>    — skip Round 2 (positions + synthesis only)
     /debate --models m1,m2,m3 <q> — override default model list
+    /debates                      — list saved debates
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol
+from pathlib import Path
+from typing import Any, Protocol
 
 import structlog
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 logger = structlog.get_logger(__name__)
 
@@ -66,6 +67,27 @@ class CompletionEngine(Protocol):
 
 
 # ======================================================================
+# Type alias for the LLM caller callback
+# ======================================================================
+
+# An LLM caller receives (model, messages) and returns a response string.
+LLMCaller = Callable[[str, list[dict[str, str]]], str]
+
+
+def _stub_llm_caller(model: str, messages: list[dict[str, str]]) -> str:
+    """Stub LLM caller that returns placeholder text for testing.
+
+    Args:
+        model: Model identifier (unused in stub).
+        messages: Chat messages (unused in stub).
+
+    Returns:
+        A placeholder response string.
+    """
+    return f"[Placeholder response from {model}]"
+
+
+# ======================================================================
 # Default model roster
 # ======================================================================
 
@@ -77,8 +99,75 @@ DEFAULT_DEBATE_MODELS: list[str] = [
 
 
 # ======================================================================
-# Data classes
+# Data classes — enhanced
 # ======================================================================
+
+
+@dataclass
+class DebateConfig:
+    """Configuration for a multi-model debate session.
+
+    Attributes:
+        round1_models: Models participating in the first round.
+        synthesis_model: Model used for the final synthesis round.
+        quick_mode: If True, skip the critique round (Round 2).
+        save_dir: Directory to persist debate reports.
+    """
+
+    round1_models: list[str] = field(
+        default_factory=lambda: ["claude-sonnet-4-5", "gpt-4o", "deepseek-chat"]
+    )
+    synthesis_model: str = "claude-sonnet-4-5"
+    quick_mode: bool = False
+    save_dir: Path = field(
+        default_factory=lambda: Path.home() / ".prism" / "debates"
+    )
+
+
+@dataclass
+class DebateRound:
+    """A single round in a debate session.
+
+    Attributes:
+        round_number: Sequential round number (1, 2, or 3).
+        positions: Mapping of model name to its response text.
+        round_type: One of ``"position"``, ``"critique"``, or ``"synthesis"``.
+    """
+
+    round_number: int
+    positions: dict[str, str] = field(default_factory=dict)
+    round_type: str = "position"
+
+
+@dataclass
+class DebateResult:
+    """Complete result of a multi-model debate.
+
+    Attributes:
+        question: The original question debated.
+        rounds: List of all debate rounds executed.
+        synthesis: The synthesized final answer.
+        consensus: Points all models agreed on.
+        disagreements: Points where models disagreed.
+        tradeoffs: Key tradeoffs identified during debate.
+        recommendation: Final actionable recommendation.
+        confidence: Confidence score between 0.0 and 1.0.
+        blind_spots: Things each model missed, keyed by model name.
+        total_cost: Total estimated cost in USD.
+        created_at: ISO-8601 timestamp of when the debate was created.
+    """
+
+    question: str
+    rounds: list[DebateRound] = field(default_factory=list)
+    synthesis: str = ""
+    consensus: str = ""
+    disagreements: str = ""
+    tradeoffs: str = ""
+    recommendation: str = ""
+    confidence: float = 0.0
+    blind_spots: dict[str, str] = field(default_factory=dict)
+    total_cost: float = 0.0
+    created_at: str = ""
 
 
 @dataclass
@@ -162,18 +251,351 @@ _ROUND2_USER_TEMPLATE = (
 )
 
 _SYNTHESIS_SYSTEM = (
-    "Synthesize all debate positions into a structured final report with: "
-    "consensus points, disagreements, recommendation, confidence score (0-1)."
+    "Synthesize all debate positions into a structured final report. "
+    "Return your response in the following format:\n\n"
+    "CONSENSUS: <points all models agree on>\n"
+    "DISAGREEMENTS: <points where models disagree>\n"
+    "TRADEOFFS: <key tradeoffs identified>\n"
+    "RECOMMENDATION: <your final recommendation>\n"
+    "CONFIDENCE: <a decimal between 0.0 and 1.0>\n"
+    "BLIND_SPOTS: <model_name>: <what they missed> (one per model)\n"
 )
 
 
 # ======================================================================
-# Main class
+# Synthesis parsing
+# ======================================================================
+
+
+def _parse_synthesis(raw: str, models: list[str]) -> dict[str, Any]:
+    """Parse a structured synthesis response into its component fields.
+
+    Extracts ``CONSENSUS``, ``DISAGREEMENTS``, ``TRADEOFFS``,
+    ``RECOMMENDATION``, ``CONFIDENCE``, and ``BLIND_SPOTS`` sections from
+    the raw synthesis text.  Falls back gracefully when sections are
+    missing.
+
+    Args:
+        raw: The raw synthesis text from the LLM.
+        models: List of model names (used for blind spot parsing).
+
+    Returns:
+        A dict with keys ``consensus``, ``disagreements``, ``tradeoffs``,
+        ``recommendation``, ``confidence``, and ``blind_spots``.
+    """
+    result: dict[str, Any] = {
+        "consensus": "",
+        "disagreements": "",
+        "tradeoffs": "",
+        "recommendation": "",
+        "confidence": 0.7,
+        "blind_spots": {},
+    }
+
+    # Try to extract each section
+    sections = [
+        ("consensus", "CONSENSUS"),
+        ("disagreements", "DISAGREEMENTS"),
+        ("tradeoffs", "TRADEOFFS"),
+        ("recommendation", "RECOMMENDATION"),
+    ]
+
+    for field_name, label in sections:
+        pattern = rf"{label}:\s*(.+?)(?=\n[A-Z_]+:|$)"
+        match = re.search(pattern, raw, re.DOTALL)
+        if match:
+            result[field_name] = match.group(1).strip()
+
+    # Parse confidence
+    conf_match = re.search(r"CONFIDENCE:\s*(-?[\d.]+)", raw)
+    if conf_match:
+        try:
+            val = float(conf_match.group(1))
+            result["confidence"] = max(0.0, min(1.0, val))
+        except ValueError:
+            result["confidence"] = 0.7
+
+    # Parse blind spots
+    blind_spots: dict[str, str] = {}
+    for model in models:
+        # Look for model-specific blind spot entries
+        model_short = model.split("/")[-1]
+        pattern = rf"{re.escape(model_short)}:\s*(.+?)(?=\n|$)"
+        match = re.search(pattern, raw)
+        if match:
+            blind_spots[model] = match.group(1).strip()
+    result["blind_spots"] = blind_spots
+
+    # If no sections parsed, use the full text as the recommendation
+    if not any(result[k] for k in ("consensus", "disagreements", "recommendation")):
+        result["recommendation"] = raw.strip()
+
+    return result
+
+
+# ======================================================================
+# Enhanced debate function
+# ======================================================================
+
+
+def debate(
+    question: str,
+    config: DebateConfig | None = None,
+    llm_caller: LLMCaller | None = None,
+) -> DebateResult:
+    """Run a structured multi-model debate on a question.
+
+    Executes a 3-round debate:
+      - Round 1: Each model provides an independent position.
+      - Round 2: Each model critiques all Round 1 responses (skipped in
+        quick mode).
+      - Round 3: A synthesis model combines all positions into a final
+        structured report.
+
+    Args:
+        question: The question or decision to debate.
+        config: Debate configuration. Uses defaults if not provided.
+        llm_caller: Callback ``(model, messages) -> response_str`` for
+            calling the LLM. Defaults to a stub for testability.
+
+    Returns:
+        A :class:`DebateResult` with all rounds and parsed synthesis.
+
+    Raises:
+        ValueError: If *question* is empty.
+    """
+    if not question or not question.strip():
+        raise ValueError("Debate question must not be empty")
+
+    cfg = config or DebateConfig()
+    caller = llm_caller or _stub_llm_caller
+    timestamp = datetime.now(UTC).isoformat()
+
+    models = list(cfg.round1_models)
+    rounds: list[DebateRound] = []
+
+    # --- Round 1: Independent positions ---
+    round1 = DebateRound(round_number=1, round_type="position")
+    for model in models:
+        messages = [
+            {"role": "system", "content": _ROUND1_SYSTEM},
+            {"role": "user", "content": question},
+        ]
+        try:
+            response = caller(model, messages)
+        except Exception as exc:
+            logger.warning("debate.round1.error", model=model, error=str(exc))
+            response = f"Error: {exc}"
+        round1.positions[model] = response
+    rounds.append(round1)
+
+    # --- Round 2: Critiques (skip in quick mode) ---
+    if not cfg.quick_mode and len(round1.positions) >= 2:
+        round2 = DebateRound(round_number=2, round_type="critique")
+        positions_text = "\n\n".join(
+            f"**{m}**: {r}" for m, r in round1.positions.items()
+        )
+        for model in models:
+            user_content = _ROUND2_USER_TEMPLATE.format(
+                question=question, positions=positions_text,
+            )
+            messages = [
+                {"role": "system", "content": _ROUND2_SYSTEM},
+                {"role": "user", "content": user_content},
+            ]
+            try:
+                response = caller(model, messages)
+            except Exception as exc:
+                logger.warning(
+                    "debate.round2.error", model=model, error=str(exc),
+                )
+                response = f"Error: {exc}"
+            round2.positions[model] = response
+        rounds.append(round2)
+
+    # --- Round 3: Synthesis ---
+    all_content_parts: list[str] = [f"Question: {question}\n"]
+    all_content_parts.append("Round 1 Positions:")
+    for m, r in round1.positions.items():
+        all_content_parts.append(f"  {m}: {r}")
+
+    if len(rounds) > 1:
+        round2_data = rounds[1]
+        all_content_parts.append("\nRound 2 Critiques:")
+        for m, r in round2_data.positions.items():
+            all_content_parts.append(f"  {m}: {r}")
+
+    all_content_parts.append("\nProvide synthesis.")
+
+    synthesis_messages = [
+        {"role": "system", "content": _SYNTHESIS_SYSTEM},
+        {"role": "user", "content": "\n".join(all_content_parts)},
+    ]
+    try:
+        raw_synthesis = caller(cfg.synthesis_model, synthesis_messages)
+    except Exception as exc:
+        logger.warning("debate.synthesis.error", error=str(exc))
+        raw_synthesis = f"Synthesis failed: {exc}"
+
+    round3 = DebateRound(
+        round_number=3,
+        round_type="synthesis",
+        positions={cfg.synthesis_model: raw_synthesis},
+    )
+    rounds.append(round3)
+
+    # Parse synthesis into structured fields
+    parsed = _parse_synthesis(raw_synthesis, models)
+
+    result = DebateResult(
+        question=question,
+        rounds=rounds,
+        synthesis=raw_synthesis,
+        consensus=parsed["consensus"],
+        disagreements=parsed["disagreements"],
+        tradeoffs=parsed["tradeoffs"],
+        recommendation=parsed["recommendation"],
+        confidence=parsed["confidence"],
+        blind_spots=parsed["blind_spots"],
+        total_cost=0.0,
+        created_at=timestamp,
+    )
+
+    # Auto-save
+    save_debate(result, cfg.save_dir)
+
+    return result
+
+
+# ======================================================================
+# Report generation
+# ======================================================================
+
+
+def generate_report_text(result: DebateResult) -> str:
+    """Generate a human-readable plain text report from a debate result.
+
+    The report includes sections for each round's positions, the final
+    synthesis, consensus, disagreements, tradeoffs, recommendation,
+    confidence, and blind spots.
+
+    Args:
+        result: The completed debate result.
+
+    Returns:
+        A formatted plain text string suitable for console display or
+        file output.
+    """
+    lines: list[str] = []
+    lines.append("=" * 60)
+    lines.append("MULTI-MODEL DEBATE REPORT")
+    lines.append("=" * 60)
+    lines.append(f"\nQuestion: {result.question}")
+    lines.append(f"Date: {result.created_at[:19] if result.created_at else 'N/A'}")
+    lines.append("")
+
+    for rnd in result.rounds:
+        round_labels = {
+            "position": "Round 1 — Independent Positions",
+            "critique": "Round 2 — Critiques",
+            "synthesis": "Round 3 — Synthesis",
+        }
+        label = round_labels.get(rnd.round_type, f"Round {rnd.round_number}")
+        lines.append(f"--- {label} ---")
+        for model_name, response in rnd.positions.items():
+            lines.append(f"\n  [{model_name}]")
+            for resp_line in response.split("\n"):
+                lines.append(f"    {resp_line}")
+        lines.append("")
+
+    lines.append("=" * 60)
+    lines.append("SYNTHESIS")
+    lines.append("=" * 60)
+
+    if result.consensus:
+        lines.append(f"\nConsensus: {result.consensus}")
+    if result.disagreements:
+        lines.append(f"\nDisagreements: {result.disagreements}")
+    if result.tradeoffs:
+        lines.append(f"\nTradeoffs: {result.tradeoffs}")
+    if result.recommendation:
+        lines.append(f"\nRecommendation: {result.recommendation}")
+
+    lines.append(f"\nConfidence: {result.confidence:.0%}")
+
+    if result.blind_spots:
+        lines.append("\nBlind Spots:")
+        for model_name, spot in result.blind_spots.items():
+            lines.append(f"  {model_name}: {spot}")
+
+    lines.append(f"\nTotal cost: ${result.total_cost:.4f}")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+# ======================================================================
+# Persistence
+# ======================================================================
+
+
+def save_debate(result: DebateResult, save_dir: Path | None = None) -> Path:
+    """Save a debate result to disk as a Markdown report.
+
+    The file is named ``<timestamp>_<topic_slug>.md`` and written to
+    *save_dir* (defaulting to ``~/.prism/debates/``).
+
+    Args:
+        result: The debate result to persist.
+        save_dir: Target directory. Created if it does not exist.
+
+    Returns:
+        Path to the saved Markdown file.
+    """
+    target_dir = save_dir or (Path.home() / ".prism" / "debates")
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = (
+        result.created_at[:19].replace(":", "-")
+        if result.created_at
+        else "unknown"
+    )
+    slug = re.sub(r"[^\w]+", "_", result.question[:40]).strip("_").lower()
+    filename = f"{timestamp}_{slug}.md"
+    path = target_dir / filename
+
+    report_text = generate_report_text(result)
+    path.write_text(report_text, encoding="utf-8")
+    logger.info("debate.saved", path=str(path))
+    return path
+
+
+def list_debates(save_dir: Path | None = None) -> list[Path]:
+    """List all saved debate reports, newest first.
+
+    Args:
+        save_dir: Directory to scan. Defaults to ``~/.prism/debates/``.
+
+    Returns:
+        List of Markdown file paths sorted newest first.
+    """
+    target_dir = save_dir or (Path.home() / ".prism" / "debates")
+    if not target_dir.exists():
+        return []
+    return sorted(target_dir.glob("*.md"), reverse=True)
+
+
+# ======================================================================
+# Main class (preserved for backward compatibility)
 # ======================================================================
 
 
 class MultiModelDebate:
     """Structured debate across multiple models for high-stakes decisions.
+
+    This class uses the :class:`CompletionEngine` protocol for LLM calls.
+    For simpler usage or testing, see the module-level :func:`debate`
+    function which accepts a plain callback.
 
     Args:
         completion_engine: An object with an ``async complete()`` method.
@@ -240,7 +662,7 @@ class MultiModelDebate:
     # Main debate orchestration
     # ------------------------------------------------------------------
 
-    async def debate(
+    async def run_debate(
         self,
         question: str,
         quick: bool = False,
@@ -284,11 +706,11 @@ class MultiModelDebate:
                 )
 
             critiques = await asyncio.gather(*r2_tasks, return_exceptions=True)
-            for critique in critiques:
-                if isinstance(critique, DebateCritique):
-                    session.round2_critiques.append(critique)
-                    session.total_cost += critique.cost_usd
-                    session.total_tokens += critique.tokens_used
+            for crit in critiques:
+                if isinstance(crit, DebateCritique):
+                    session.round2_critiques.append(crit)
+                    session.total_cost += crit.cost_usd
+                    session.total_tokens += crit.tokens_used
 
         # ------ Round 3: Synthesis ------
         synthesis = await self._synthesize(question, session)
@@ -299,6 +721,14 @@ class MultiModelDebate:
 
         self._history.append(session)
         return session
+
+    # Keep old name as alias for backward compatibility
+    async def debate(
+        self,
+        question: str,
+        quick: bool = False,
+    ) -> DebateSession:
+        return await self.run_debate(question, quick=quick)
 
     # ------------------------------------------------------------------
     # Round helpers
@@ -447,7 +877,7 @@ class MultiModelDebate:
             return None
 
     # ------------------------------------------------------------------
-    # Persistence
+    # Persistence (legacy)
     # ------------------------------------------------------------------
 
     def save_debate(self, session: DebateSession, save_dir: Path) -> Path:
@@ -462,9 +892,16 @@ class MultiModelDebate:
         """
         save_dir.mkdir(parents=True, exist_ok=True)
         # Use ISO date prefix + truncated timestamp for uniqueness
-        timestamp = session.created_at[:19].replace(":", "-") if session.created_at else "unknown"
+        timestamp = (
+            session.created_at[:19].replace(":", "-")
+            if session.created_at
+            else "unknown"
+        )
         filename = f"debate_{timestamp}.json"
         path = save_dir / filename
-        path.write_text(json.dumps(asdict(session), indent=2, default=str), encoding="utf-8")
+        path.write_text(
+            json.dumps(asdict(session), indent=2, default=str),
+            encoding="utf-8",
+        )
         logger.info("debate.saved", path=str(path))
         return path

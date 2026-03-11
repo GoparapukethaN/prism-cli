@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +17,7 @@ from prism.intelligence.deps import (
     DepsReport,
     MigrationComplexity,
     Vulnerability,
+    VulnerabilityReport,
     VulnerabilitySeverity,
 )
 
@@ -466,63 +466,64 @@ class TestDependencyMonitor:
         assert monitor.assess_migration(dep) is MigrationComplexity.TRIVIAL
 
     def test_assess_migration_trivial(self, tmp_path: Path) -> None:
+        """Patch bump → TRIVIAL via version heuristic."""
         monitor = DependencyMonitor(tmp_path)
-        dep = DependencyInfo("pkg", "1.0", "2.0", True, 180, "python", "pyproject.toml", usages=2)
+        dep = DependencyInfo("pkg", "1.0.0", "1.0.1", True, 180, "python", "pyproject.toml", usages=2)
         assert monitor.assess_migration(dep) is MigrationComplexity.TRIVIAL
 
     def test_assess_migration_simple(self, tmp_path: Path) -> None:
+        """Minor bump → SIMPLE via version heuristic."""
         monitor = DependencyMonitor(tmp_path)
-        dep = DependencyInfo("pkg", "1.0", "2.0", True, 180, "python", "pyproject.toml", usages=5)
+        dep = DependencyInfo("pkg", "1.0.0", "1.1.0", True, 180, "python", "pyproject.toml", usages=5)
         assert monitor.assess_migration(dep) is MigrationComplexity.SIMPLE
 
     def test_assess_migration_moderate(self, tmp_path: Path) -> None:
+        """Large minor gap (>5) → MODERATE via version heuristic."""
         monitor = DependencyMonitor(tmp_path)
-        dep = DependencyInfo("pkg", "1.0", "2.0", True, 180, "python", "pyproject.toml", usages=15)
+        dep = DependencyInfo("pkg", "1.0.0", "1.8.0", True, 180, "python", "pyproject.toml", usages=15)
         assert monitor.assess_migration(dep) is MigrationComplexity.MODERATE
 
     def test_assess_migration_complex(self, tmp_path: Path) -> None:
+        """Major version change → COMPLEX via version heuristic."""
         monitor = DependencyMonitor(tmp_path)
         dep = DependencyInfo("pkg", "1.0", "2.0", True, 180, "python", "pyproject.toml", usages=25)
         assert monitor.assess_migration(dep) is MigrationComplexity.COMPLEX
 
     def test_assess_migration_boundary_simple(self, tmp_path: Path) -> None:
-        """Boundary: 4 usages -> SIMPLE (>3 threshold)."""
+        """Fallback: 4 usages -> SIMPLE (>3 threshold) when no latest_version."""
         monitor = DependencyMonitor(tmp_path)
-        dep = DependencyInfo("pkg", "1.0", "2.0", True, 0, "python", "pyproject.toml", usages=4)
+        dep = DependencyInfo("pkg", "1.0", "", True, 0, "python", "pyproject.toml", usages=4)
         assert monitor.assess_migration(dep) is MigrationComplexity.SIMPLE
 
     def test_assess_migration_boundary_moderate(self, tmp_path: Path) -> None:
-        """Boundary: 11 usages -> MODERATE (>10 threshold)."""
+        """Fallback: 11 usages -> MODERATE (>10 threshold) when no latest_version."""
         monitor = DependencyMonitor(tmp_path)
-        dep = DependencyInfo("pkg", "1.0", "2.0", True, 0, "python", "pyproject.toml", usages=11)
+        dep = DependencyInfo("pkg", "1.0", "", True, 0, "python", "pyproject.toml", usages=11)
         assert monitor.assess_migration(dep) is MigrationComplexity.MODERATE
 
     def test_assess_migration_boundary_complex(self, tmp_path: Path) -> None:
-        """Boundary: 21 usages -> COMPLEX (>20 threshold)."""
+        """Fallback: 21 usages -> COMPLEX (>20 threshold) when no latest_version."""
         monitor = DependencyMonitor(tmp_path)
-        dep = DependencyInfo("pkg", "1.0", "2.0", True, 0, "python", "pyproject.toml", usages=21)
+        dep = DependencyInfo("pkg", "1.0", "", True, 0, "python", "pyproject.toml", usages=21)
         assert monitor.assess_migration(dep) is MigrationComplexity.COMPLEX
 
     # --- Check vulnerabilities ---
 
-    @patch("prism.intelligence.deps.subprocess.run")
+    @patch("prism.intelligence.deps.DependencyMonitor._query_osv")
     def test_check_vulnerabilities_with_results(
-        self, mock_run: MagicMock, tmp_path: Path,
+        self, mock_query: MagicMock, tmp_path: Path,
     ) -> None:
-        pip_audit_output = {
-            "vulnerabilities": [
-                {
-                    "name": "django",
-                    "id": "CVE-2024-9999",
-                    "description": "XSS vulnerability",
-                    "fix_versions": ["4.2.10"],
-                    "version": "4.2.5",
-                },
-            ],
-        }
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout=json.dumps(pip_audit_output),
-        )
+        mock_query.return_value = [
+            VulnerabilityReport(
+                package="django",
+                cve_id="CVE-2024-9999",
+                severity=VulnerabilitySeverity.HIGH,
+                description="XSS vulnerability",
+                fixed_version="4.2.10",
+                url="",
+            ),
+        ]
+        (tmp_path / "requirements.txt").write_text("django>=4.2.5\n")
         monitor = DependencyMonitor(tmp_path)
         vulns = monitor._check_vulnerabilities()
         assert len(vulns) == 1
@@ -531,76 +532,52 @@ class TestDependencyMonitor:
         assert vulns[0].fixed_version == "4.2.10"
         assert vulns[0].severity is VulnerabilitySeverity.HIGH
 
-    @patch("prism.intelligence.deps.subprocess.run")
+    @patch("prism.intelligence.deps.DependencyMonitor._query_osv")
     def test_check_vulnerabilities_no_results(
-        self, mock_run: MagicMock, tmp_path: Path,
+        self, mock_query: MagicMock, tmp_path: Path,
     ) -> None:
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout=json.dumps({"vulnerabilities": []}),
-        )
+        mock_query.return_value = []
+        (tmp_path / "requirements.txt").write_text("django>=4.2.5\n")
         monitor = DependencyMonitor(tmp_path)
         vulns = monitor._check_vulnerabilities()
         assert vulns == []
 
-    @patch("prism.intelligence.deps.subprocess.run")
-    def test_check_vulnerabilities_pip_audit_not_found(
-        self, mock_run: MagicMock, tmp_path: Path,
+    @patch("prism.intelligence.deps.DependencyMonitor._query_osv")
+    def test_check_vulnerabilities_query_error(
+        self, mock_query: MagicMock, tmp_path: Path,
     ) -> None:
-        mock_run.side_effect = FileNotFoundError("pip-audit not found")
+        mock_query.side_effect = Exception("Network error")
+        (tmp_path / "requirements.txt").write_text("django>=4.2.5\n")
         monitor = DependencyMonitor(tmp_path)
         vulns = monitor._check_vulnerabilities()
         assert vulns == []
 
-    @patch("prism.intelligence.deps.subprocess.run")
-    def test_check_vulnerabilities_timeout(
-        self, mock_run: MagicMock, tmp_path: Path,
-    ) -> None:
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="pip-audit", timeout=60)
-        monitor = DependencyMonitor(tmp_path)
-        vulns = monitor._check_vulnerabilities()
-        assert vulns == []
-
-    @patch("prism.intelligence.deps.subprocess.run")
-    def test_check_vulnerabilities_nonzero_returncode(
-        self, mock_run: MagicMock, tmp_path: Path,
-    ) -> None:
-        mock_run.return_value = MagicMock(returncode=1, stdout="error")
-        monitor = DependencyMonitor(tmp_path)
-        vulns = monitor._check_vulnerabilities()
-        assert vulns == []
-
-    @patch("prism.intelligence.deps.subprocess.run")
-    def test_check_vulnerabilities_malformed_json(
-        self, mock_run: MagicMock, tmp_path: Path,
-    ) -> None:
-        mock_run.return_value = MagicMock(returncode=0, stdout="not-json{{{")
+    def test_check_vulnerabilities_no_deps(self, tmp_path: Path) -> None:
         monitor = DependencyMonitor(tmp_path)
         vulns = monitor._check_vulnerabilities()
         assert vulns == []
 
     def test_check_vulnerabilities_non_python_ecosystem(self, tmp_path: Path) -> None:
+        """With no node deps, filtering by node yields empty."""
         monitor = DependencyMonitor(tmp_path)
         vulns = monitor._check_vulnerabilities(ecosystem="node")
         assert vulns == []
 
-    @patch("prism.intelligence.deps.subprocess.run")
+    @patch("prism.intelligence.deps.DependencyMonitor._query_osv")
     def test_check_vulnerabilities_no_fix_versions(
-        self, mock_run: MagicMock, tmp_path: Path,
+        self, mock_query: MagicMock, tmp_path: Path,
     ) -> None:
-        pip_audit_output = {
-            "vulnerabilities": [
-                {
-                    "name": "old-pkg",
-                    "id": "CVE-2024-0001",
-                    "description": "Some vuln",
-                    "fix_versions": [],
-                    "version": "1.0.0",
-                },
-            ],
-        }
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout=json.dumps(pip_audit_output),
-        )
+        mock_query.return_value = [
+            VulnerabilityReport(
+                package="old-pkg",
+                cve_id="CVE-2024-0001",
+                severity=VulnerabilitySeverity.MEDIUM,
+                description="Some vuln",
+                fixed_version="",
+                url="",
+            ),
+        ]
+        (tmp_path / "requirements.txt").write_text("old-pkg>=1.0.0\n")
         monitor = DependencyMonitor(tmp_path)
         vulns = monitor._check_vulnerabilities()
         assert len(vulns) == 1
@@ -608,8 +585,9 @@ class TestDependencyMonitor:
 
     # --- get_status (integration) ---
 
-    @patch("prism.intelligence.deps.subprocess.run")
-    def test_get_status_full_report(self, mock_run: MagicMock, tmp_path: Path) -> None:
+    @patch("prism.intelligence.deps.DependencyMonitor._query_osv")
+    def test_get_status_full_report(self, mock_query: MagicMock, tmp_path: Path) -> None:
+        mock_query.return_value = []
         # Create pyproject.toml with deps
         src = tmp_path / "src"
         src.mkdir()
@@ -621,7 +599,6 @@ class TestDependencyMonitor:
             '    "some-unused-pkg>=1.0",\n'
             "]\n"
         )
-        mock_run.side_effect = FileNotFoundError("pip-audit not found")
 
         monitor = DependencyMonitor(tmp_path)
         report = monitor.get_status()
@@ -634,10 +611,11 @@ class TestDependencyMonitor:
         # some-unused-pkg should be flagged as unused
         assert "some-unused-pkg" in report.unused_deps
 
-    @patch("prism.intelligence.deps.subprocess.run")
+    @patch("prism.intelligence.deps.DependencyMonitor._query_osv")
     def test_get_status_ecosystem_filter(
-        self, mock_run: MagicMock, tmp_path: Path,
+        self, mock_query: MagicMock, tmp_path: Path,
     ) -> None:
+        mock_query.return_value = []
         (tmp_path / "pyproject.toml").write_text(
             "dependencies = [\n"
             '    "requests>=2.28",\n'
@@ -646,7 +624,6 @@ class TestDependencyMonitor:
         (tmp_path / "package.json").write_text(
             json.dumps({"dependencies": {"express": "^4.0.0"}}),
         )
-        mock_run.side_effect = FileNotFoundError("pip-audit not found")
 
         monitor = DependencyMonitor(tmp_path)
 
@@ -662,11 +639,11 @@ class TestDependencyMonitor:
         assert "express" in node_names
         assert "requests" not in node_names
 
-    @patch("prism.intelligence.deps.subprocess.run")
+    @patch("prism.intelligence.deps.DependencyMonitor._query_osv")
     def test_get_status_empty_project(
-        self, mock_run: MagicMock, tmp_path: Path,
+        self, mock_query: MagicMock, tmp_path: Path,
     ) -> None:
-        mock_run.side_effect = FileNotFoundError("pip-audit not found")
+        mock_query.return_value = []
         monitor = DependencyMonitor(tmp_path)
         report = monitor.get_status()
         assert report.total_deps == 0
@@ -674,17 +651,17 @@ class TestDependencyMonitor:
         assert report.vulnerable == 0
         assert report.unused == 0
 
-    @patch("prism.intelligence.deps.subprocess.run")
+    @patch("prism.intelligence.deps.DependencyMonitor._query_osv")
     def test_get_status_assigns_migration_complexity(
-        self, mock_run: MagicMock, tmp_path: Path,
+        self, mock_query: MagicMock, tmp_path: Path,
     ) -> None:
+        mock_query.return_value = []
         # Create a project where a dep has many usages
         src = tmp_path / "src"
         src.mkdir()
         for i in range(25):
             (src / f"mod_{i}.py").write_text("import requests\n")
         (tmp_path / "requirements.txt").write_text("requests>=2.28\n")
-        mock_run.side_effect = FileNotFoundError("pip-audit not found")
 
         monitor = DependencyMonitor(tmp_path)
         report = monitor.get_status()
