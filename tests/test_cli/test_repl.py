@@ -2387,3 +2387,187 @@ class TestRunReplNoCache:
 
         output = _get_output(con)
         assert len(output) > 0
+
+
+# ===========================================================================
+# /ignore command tests
+# ===========================================================================
+
+
+class TestIgnoreCommand:
+    """Tests for the /ignore slash command."""
+
+    def test_ignore_list_default(self, tmp_path: Path) -> None:
+        """'/ignore' with no args lists patterns (defaults loaded)."""
+        action, output, _, _, _ = _cmd("/ignore", tmp_path)
+        assert action == "continue"
+        # Default patterns include .env
+        assert ".env" in output
+
+    def test_ignore_list_explicit(self, tmp_path: Path) -> None:
+        """'/ignore list' explicitly lists patterns."""
+        action, output, _, _, _ = _cmd("/ignore list", tmp_path)
+        assert action == "continue"
+        assert ".prismignore patterns" in output
+
+    def test_ignore_add_no_args_shows_usage(
+        self, tmp_path: Path,
+    ) -> None:
+        action, output, _, _, _ = _cmd("/ignore add", tmp_path)
+        assert action == "continue"
+        assert "Usage" in output
+
+    def test_ignore_add_pattern(self, tmp_path: Path) -> None:
+        """Adding a new pattern reports success."""
+        action, output, _, _, _ = _cmd(
+            "/ignore add *.secret", tmp_path,
+        )
+        assert action == "continue"
+        assert "Added pattern" in output
+        assert "*.secret" in output
+
+    def test_ignore_add_duplicate_pattern(
+        self, tmp_path: Path,
+    ) -> None:
+        """Adding an existing default pattern reports duplicate."""
+        action, output, _, _, _ = _cmd(
+            "/ignore add .env", tmp_path,
+        )
+        assert action == "continue"
+        assert "already exists" in output
+
+    def test_ignore_check_no_args_shows_usage(
+        self, tmp_path: Path,
+    ) -> None:
+        action, output, _, _, _ = _cmd(
+            "/ignore check", tmp_path,
+        )
+        assert action == "continue"
+        assert "Usage" in output
+
+    def test_ignore_check_ignored_file(
+        self, tmp_path: Path,
+    ) -> None:
+        """.env should be ignored by default patterns."""
+        action, output, _, _, _ = _cmd(
+            "/ignore check .env", tmp_path,
+        )
+        assert action == "continue"
+        assert "IGNORED" in output
+
+    def test_ignore_check_not_ignored_file(
+        self, tmp_path: Path,
+    ) -> None:
+        """A normal Python file should not be ignored."""
+        action, output, _, _, _ = _cmd(
+            "/ignore check main.py", tmp_path,
+        )
+        assert action == "continue"
+        assert "NOT IGNORED" in output
+
+    def test_ignore_check_shows_matching_pattern(
+        self, tmp_path: Path,
+    ) -> None:
+        """Check should show which pattern matched."""
+        action, output, _, _, _ = _cmd(
+            "/ignore check server.key", tmp_path,
+        )
+        assert action == "continue"
+        assert "IGNORED" in output
+        assert "*.key" in output
+
+    def test_ignore_create_when_exists(
+        self, tmp_path: Path,
+    ) -> None:
+        """Create should warn if .prismignore already exists."""
+        # Create the file first
+        (tmp_path / ".prismignore").write_text("*.log\n")
+        action, output, _, _, _ = _cmd(
+            "/ignore create", tmp_path,
+        )
+        assert action == "continue"
+        assert "already exists" in output
+
+    def test_ignore_create_new(self, tmp_path: Path) -> None:
+        """Create should succeed when no .prismignore exists.
+
+        PrismIgnore falls back to defaults in memory even without
+        a file, so we need a subdirectory with no .prismignore.
+        """
+        sub = tmp_path / "subproject"
+        sub.mkdir()
+        stg = _make_settings(sub)
+        action, _output, _, _, _ = _cmd(
+            "/ignore create", sub, settings=stg,
+        )
+        assert action == "continue"
+        # File should have been created on disk
+        assert (sub / ".prismignore").is_file()
+
+    def test_ignore_unknown_subcommand(
+        self, tmp_path: Path,
+    ) -> None:
+        action, output, _, _, _ = _cmd(
+            "/ignore bogus", tmp_path,
+        )
+        assert action == "continue"
+        assert "Usage" in output
+
+
+# ===========================================================================
+# /add prismignore warning tests
+# ===========================================================================
+
+
+class TestAddPrismignoreWarning:
+    """Tests that /add warns about .prismignore-matched files."""
+
+    def test_add_ignored_file_shows_warning(
+        self, tmp_path: Path,
+    ) -> None:
+        """Adding .env should produce an ignore warning."""
+        action, output, _, _, st = _cmd(
+            "/add .env", tmp_path,
+        )
+        assert action == "continue"
+        assert "Warning" in output
+        assert ".prismignore" in output
+        # File should still be added
+        assert ".env" in st.active_files
+
+    def test_add_normal_file_no_warning(
+        self, tmp_path: Path,
+    ) -> None:
+        """Adding a normal file should not produce a warning."""
+        action, output, _, _, st = _cmd(
+            "/add main.py", tmp_path,
+        )
+        assert action == "continue"
+        assert "Warning" not in output
+        assert "main.py" in st.active_files
+
+    def test_add_key_file_shows_warning(
+        self, tmp_path: Path,
+    ) -> None:
+        """Adding *.key files should warn (crypto key pattern)."""
+        action, output, _, _, st = _cmd(
+            "/add server.key", tmp_path,
+        )
+        assert action == "continue"
+        assert "Warning" in output
+        assert "secrets" in output.lower() or "prismignore" in output
+        assert "server.key" in st.active_files
+
+    def test_add_mixed_warns_only_for_ignored(
+        self, tmp_path: Path,
+    ) -> None:
+        """Mixed add: warns for .env but not for safe.py."""
+        action, output, _, _, st = _cmd(
+            "/add .env safe.py", tmp_path,
+        )
+        assert action == "continue"
+        # Should have warning for .env
+        assert "Warning" in output
+        # Both files added
+        assert ".env" in st.active_files
+        assert "safe.py" in st.active_files

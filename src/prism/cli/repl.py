@@ -100,6 +100,8 @@ COMMAND_CATEGORIES: dict[str, list[tuple[str, str]]] = {
         ("/workspace [list|switch|add|remove] [name]",
          "Multi-project workspace"),
         ("/offline [status|queue]", "Offline mode info"),
+        ("/ignore [add|list|check|create] [pattern|file]",
+         "Manage .prismignore patterns"),
     ],
 }
 
@@ -297,6 +299,7 @@ def _dispatch_command(
         "/history": _cmd_history,
         "/budget": _cmd_budget,
         "/architect": _cmd_architect,
+        "/ignore": _cmd_ignore,
     }
 
     handler = dispatch.get(cmd)
@@ -413,16 +416,37 @@ def _cmd_add(
     args: str,
     console: Console,
     state: _SessionState,
+    settings: Settings,
     **_: Any,
 ) -> str:
-    """Add files to the context."""
+    """Add files to the context.
+
+    Warns when a file matches a ``.prismignore`` pattern (likely
+    contains secrets) but still adds it per user intent.
+    """
     if not args:
         console.print("[yellow]Usage:[/] /add <file1> [file2] ...")
         return "continue"
 
+    # Load .prismignore for warning checks (best-effort)
+    try:
+        from prism.security.prismignore import PrismIgnore
+
+        prismignore: PrismIgnore | None = PrismIgnore(
+            settings.project_root,
+        )
+    except Exception:
+        prismignore = None
+
     new_files = args.split()
     for f in new_files:
         if f not in state.active_files:
+            # Warn if the file is in .prismignore
+            if prismignore is not None and prismignore.is_ignored(f):
+                console.print(
+                    f"  [yellow]Warning:[/] {f} is in "
+                    ".prismignore (likely contains secrets)"
+                )
             state.active_files.append(f)
             console.print(f"  [green]+[/] {f}")
         else:
@@ -2031,53 +2055,126 @@ def _cmd_privacy(
 ) -> str:
     """Privacy mode — Ollama-only routing."""
     try:
-        from prism.network.privacy import PrivacyManager
+        from prism.network.privacy import (
+            RECOMMENDED_MODELS,
+            PrivacyManager,
+        )
 
         pm = PrivacyManager()
         sub = args.lower().strip()
 
         if sub == "on":
             status = pm.enable_private_mode()
-            console.print("[green]Privacy mode ENABLED.[/]")
             console.print(
-                f"  Ollama running: "
-                f"{'yes' if status.ollama_running else 'no'}"
+                "[bold green]Privacy mode ENABLED"
+                "[/bold green] "
+                "[green](all traffic stays local)"
+                "[/green]"
             )
-            console.print(
-                f"  Local models: {len(status.available_models)}"
+            ollama_ind = (
+                "[green]running[/green]"
+                if status.ollama_running
+                else "[red]not running[/red]"
             )
+            console.print(f"  Ollama: {ollama_ind}")
+            if status.available_models:
+                console.print(
+                    "  [bold]Installed models"
+                    f" ({len(status.available_models)}"
+                    "):[/bold]"
+                )
+                for m in status.available_models:
+                    size_gb = (
+                        m.size_bytes / 1_073_741_824
+                    )
+                    console.print(
+                        f"    [cyan]{m.name}[/cyan]"
+                        f" ({size_gb:.1f} GB)"
+                    )
+            else:
+                console.print(
+                    "  [yellow]No local models "
+                    "found.[/yellow]"
+                )
+                console.print(
+                    "  [bold]Recommended "
+                    "models:[/bold]"
+                )
+                for name, desc in (
+                    RECOMMENDED_MODELS.items()
+                ):
+                    console.print(
+                        f"    [cyan]{name}[/cyan]"
+                        f" — {desc}"
+                    )
+                console.print(
+                    "\n  [dim]Try:[/dim] "
+                    "[bold]ollama pull "
+                    "qwen2.5-coder:7b[/bold]"
+                )
 
         elif sub == "off":
             pm.disable_private_mode()
             console.print(
-                "[yellow]Privacy mode disabled. "
-                "Cloud providers re-enabled.[/]"
+                "[yellow]Privacy mode disabled."
+                "[/yellow] "
+                "Cloud providers re-enabled."
             )
 
         else:
             # status (default)
             status = pm.get_status()
-            level_color = (
-                "green" if status.level.value == "normal" else "red"
-            )
+            if status.level.value == "private":
+                indicator = (
+                    "[bold green]PRIVATE"
+                    "[/bold green] "
+                    "[green](local only)[/green]"
+                )
+            else:
+                indicator = (
+                    "[bold]NORMAL[/bold]"
+                    " (cloud + local)"
+                )
             console.print(
-                f"[bold]Privacy:[/] "
-                f"[{level_color}]{status.level.value.upper()}"
-                f"[/{level_color}]"
+                "[bold]Privacy mode:[/bold]"
+                f" {indicator}"
             )
-            console.print(
-                f"  Ollama: "
-                f"{'running' if status.ollama_running else 'not running'}"
+            ollama_ind = (
+                "[green]running[/green]"
+                if status.ollama_running
+                else "[red]not running[/red]"
             )
+            console.print(f"  Ollama: {ollama_ind}")
             if status.available_models:
-                console.print("  Local models:")
+                console.print(
+                    "  [bold]Installed models"
+                    f" ({len(status.available_models)}"
+                    "):[/bold]"
+                )
                 for m in status.available_models:
-                    size_gb = m.size_bytes / 1_073_741_824
+                    size_gb = (
+                        m.size_bytes / 1_073_741_824
+                    )
                     console.print(
-                        f"    {m.name} ({size_gb:.1f} GB)"
+                        f"    [cyan]{m.name}[/cyan]"
+                        f" ({size_gb:.1f} GB)"
                     )
             else:
-                console.print("  [dim]No local models found.[/dim]")
+                console.print(
+                    "  [dim]No local models "
+                    "installed.[/dim]"
+                )
+            console.print(
+                "  [bold]Recommended models:"
+                "[/bold]"
+            )
+            for name, desc in (
+                RECOMMENDED_MODELS.items()
+            ):
+                console.print(
+                    f"    [cyan]{name}[/cyan]"
+                    f" — {desc}"
+                )
 
     except Exception as exc:
         logger.debug("privacy_error", error=str(exc))
@@ -3348,6 +3445,139 @@ def _cmd_architect(
     except Exception as exc:
         logger.debug("architect_error", error=str(exc))
         console.print(f"[red]Architect error:[/] {exc}")
+    return "continue"
+
+
+def _cmd_ignore(
+    args: str,
+    console: Console,
+    settings: Settings,
+    **_: Any,
+) -> str:
+    """Manage ``.prismignore`` patterns.
+
+    Subcommands:
+        ``/ignore`` or ``/ignore list`` -- show all current patterns.
+        ``/ignore add <pattern>``       -- add a pattern to .prismignore.
+        ``/ignore check <file>``        -- check if a file is ignored.
+        ``/ignore create``              -- create default .prismignore.
+    """
+    from prism.security.prismignore import PrismIgnore
+
+    try:
+        prismignore = PrismIgnore(settings.project_root)
+    except Exception as exc:
+        logger.debug("prismignore_load_error", error=str(exc))
+        console.print(f"[red]Failed to load .prismignore:[/] {exc}")
+        return "continue"
+
+    parts = args.strip().split(maxsplit=1)
+    sub = parts[0].lower() if parts and parts[0] else "list"
+    sub_args = parts[1].strip() if len(parts) > 1 else ""
+
+    # --- /ignore list (default) ---
+    if sub == "list":
+        patterns = prismignore.patterns
+        if not patterns:
+            console.print(
+                "[dim]No active patterns in .prismignore.[/dim]"
+            )
+            return "continue"
+
+        table = Table(
+            title=".prismignore patterns",
+            show_header=False,
+            box=None,
+            padding=(0, 2),
+            title_style="bold cyan",
+        )
+        table.add_column(
+            "#", style="dim", justify="right", width=4,
+        )
+        table.add_column("Pattern", style="cyan")
+        for i, pattern in enumerate(patterns, 1):
+            table.add_row(str(i), pattern)
+        console.print(table)
+        console.print(
+            f"\n[dim]{len(patterns)} active pattern(s) "
+            f"from {prismignore.file_path}[/dim]"
+        )
+        return "continue"
+
+    # --- /ignore add <pattern> ---
+    if sub == "add":
+        if not sub_args:
+            console.print(
+                "[yellow]Usage:[/] /ignore add <pattern>\n"
+                "[dim]Example: /ignore add *.secret[/dim]"
+            )
+            return "continue"
+        pattern = sub_args.strip()
+        if pattern in prismignore.patterns:
+            console.print(
+                f"[dim]Pattern already exists:[/dim] {pattern}"
+            )
+            return "continue"
+        prismignore.add_pattern(pattern)
+        console.print(
+            f"[green]Added pattern:[/] {pattern}"
+        )
+        return "continue"
+
+    # --- /ignore check <file> ---
+    if sub == "check":
+        if not sub_args:
+            console.print(
+                "[yellow]Usage:[/] /ignore check <file>\n"
+                "[dim]Example: /ignore check .env.local[/dim]"
+            )
+            return "continue"
+        filepath = sub_args.strip()
+        ignored = prismignore.is_ignored(filepath)
+        if ignored:
+            # Find the matching pattern by iterating compiled
+            rel = prismignore._get_relative(filepath)
+            matching = ""
+            if rel is not None:
+                for pat, negated in prismignore._compiled:
+                    if prismignore._matches(rel, pat):
+                        matching = pat if not negated else ""
+            if matching:
+                console.print(
+                    f"[red]IGNORED[/] {filepath}"
+                    f" — matched pattern: [cyan]{matching}[/]"
+                )
+            else:
+                console.print(
+                    f"[red]IGNORED[/] {filepath}"
+                )
+        else:
+            console.print(
+                f"[green]NOT IGNORED[/] {filepath}"
+            )
+        return "continue"
+
+    # --- /ignore create ---
+    if sub == "create":
+        if prismignore.file_path.is_file():
+            console.print(
+                "[yellow].prismignore already exists at:[/] "
+                f"{prismignore.file_path}"
+            )
+            return "continue"
+        created = prismignore.create_default()
+        console.print(
+            f"[green]Created default .prismignore:[/] {created}"
+        )
+        return "continue"
+
+    # Unknown subcommand
+    console.print(
+        "[yellow]Usage:[/] /ignore [add|list|check|create] "
+        "[pattern|file]\n"
+        "[dim]Subcommands: list, add <pattern>, "
+        "check <file>, create[/dim]"
+    )
     return "continue"
 
 

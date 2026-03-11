@@ -30,6 +30,9 @@ app.add_typer(config_app, name="config")
 db_app = typer.Typer(help="Database maintenance commands.")
 app.add_typer(db_app, name="db")
 
+plugins_app = typer.Typer(help="Manage Prism plugins.")
+app.add_typer(plugins_app, name="plugins")
+
 from prism.cli.commands.projects import projects_app  # noqa: E402
 
 app.add_typer(projects_app, name="projects")
@@ -120,6 +123,11 @@ def main_callback(
         "-p",
         help="Switch to a registered project by name before starting.",
     ),
+    no_verify_ssl: bool = typer.Option(
+        False,
+        "--no-verify-ssl",
+        help="Skip SSL certificate verification (dangerous).",
+    ),
 ) -> None:
     """Start Prism interactive REPL or run with subcommands."""
     if ctx.invoked_subcommand is not None:
@@ -140,6 +148,7 @@ def main_callback(
         offline=offline,
         no_cache=no_cache,
         project=project,
+        no_verify_ssl=no_verify_ssl,
     )
 
 
@@ -156,9 +165,20 @@ def _start_repl(
     offline: bool,
     no_cache: bool = False,
     project: str | None = None,
+    no_verify_ssl: bool = False,
 ) -> None:
     """Initialize and start the interactive REPL."""
+    import os
+
     from prism.config.settings import load_settings
+
+    # Handle --no-verify-ssl
+    if no_verify_ssl:
+        os.environ["PRISM_SSL_VERIFY"] = "false"
+        console.print(
+            "[yellow]Warning:[/] SSL verification "
+            "disabled. This is insecure."
+        )
 
     # Build config overrides from CLI flags
     overrides: dict[str, object] = {}
@@ -496,6 +516,165 @@ def db_vacuum() -> None:
         f"[green]Vacuum complete.[/] Reclaimed {saved / 1024:.1f} KB "
         f"({size_after / 1024:.1f} KB remaining)"
     )
+
+
+# --- Plugins Subcommands ---
+
+
+@plugins_app.command("list")
+def plugins_list() -> None:
+    """List installed and available plugins."""
+    from rich.table import Table
+
+    from prism.config.settings import load_settings
+    from prism.plugins.manager import PluginManager
+
+    settings = load_settings()
+    settings.ensure_directories()
+    manager = PluginManager(
+        plugins_dir=settings.prism_home / "plugins",
+    )
+
+    installed = manager.list_installed()
+    available = manager.list_available()
+
+    # Installed plugins table
+    console.print("\n[bold]Installed Plugins[/bold]\n")
+    if installed:
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Name", style="green")
+        table.add_column("Version")
+        table.add_column("Enabled")
+        table.add_column("Description")
+        for info in installed:
+            m = info.manifest
+            status = "[green]yes[/green]" if info.enabled else "[red]no[/red]"
+            table.add_row(m.name, m.version, status, m.description)
+        console.print(table)
+    else:
+        console.print("  [dim]No plugins installed.[/dim]")
+
+    # Available plugins table
+    console.print("\n[bold]Available Plugins[/bold]\n")
+    installed_names = {i.manifest.name for i in installed}
+    not_installed = [
+        a for a in available if a.name not in installed_names
+    ]
+    if not_installed:
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Name", style="yellow")
+        table.add_column("Version")
+        table.add_column("Description")
+        for m in not_installed:
+            table.add_row(m.name, m.version, m.description)
+        console.print(table)
+    else:
+        console.print("  [dim]All available plugins are installed.[/dim]")
+    console.print()
+
+
+@plugins_app.command("install")
+def plugins_install(
+    source: str = typer.Argument(
+        help="Plugin name, GitHub URL, or local path.",
+    ),
+) -> None:
+    """Install a plugin."""
+    from prism.config.settings import load_settings
+    from prism.plugins.manager import PluginError, PluginManager
+
+    settings = load_settings()
+    settings.ensure_directories()
+    manager = PluginManager(
+        plugins_dir=settings.prism_home / "plugins",
+    )
+
+    console.print(f"[dim]Installing plugin from:[/dim] {source}")
+    try:
+        info = manager.install(source)
+        console.print(
+            f"[green]Installed[/green] "
+            f"{info.manifest.name} v{info.manifest.version}"
+        )
+    except PluginError as exc:
+        console.print(f"[red]Error:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+
+@plugins_app.command("remove")
+def plugins_remove(
+    name: str = typer.Argument(help="Plugin name to remove."),
+) -> None:
+    """Remove an installed plugin."""
+    from prism.config.settings import load_settings
+    from prism.plugins.manager import PluginError, PluginManager
+
+    settings = load_settings()
+    settings.ensure_directories()
+    manager = PluginManager(
+        plugins_dir=settings.prism_home / "plugins",
+    )
+
+    try:
+        removed = manager.remove(name)
+        if removed:
+            console.print(
+                f"[green]Removed[/green] plugin: {name}"
+            )
+        else:
+            console.print(
+                f"[yellow]Plugin not found:[/] {name}"
+            )
+    except PluginError as exc:
+        console.print(f"[red]Error:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+
+@plugins_app.command("info")
+def plugins_info(
+    name: str = typer.Argument(help="Plugin name."),
+) -> None:
+    """Show plugin details."""
+    from prism.config.settings import load_settings
+    from prism.plugins.manager import PluginManager
+
+    settings = load_settings()
+    settings.ensure_directories()
+    manager = PluginManager(
+        plugins_dir=settings.prism_home / "plugins",
+    )
+
+    info = manager.get_plugin(name)
+    if info is None:
+        console.print(f"[yellow]Plugin not found:[/] {name}")
+        raise typer.Exit(1)
+
+    m = info.manifest
+    console.print(f"\n[bold]{m.name}[/bold] v{m.version}")
+    console.print(f"  Author:      {m.author or 'Unknown'}")
+    console.print(f"  Description: {m.description or 'N/A'}")
+    console.print(f"  License:     {m.license or 'N/A'}")
+    console.print(f"  Homepage:    {m.homepage or 'N/A'}")
+
+    enabled = "[green]yes[/green]" if info.enabled else "[red]no[/red]"
+    console.print(f"  Enabled:     {enabled}")
+    console.print(f"  Path:        {info.install_path}")
+
+    if info.installed_at:
+        console.print(f"  Installed:   {info.installed_at}")
+    if info.source:
+        console.print(f"  Source:      {info.source}")
+
+    if m.tools:
+        names = ", ".join(t.name for t in m.tools)
+        console.print(f"  Tools:       {names}")
+    if m.commands:
+        names = ", ".join(c.name for c in m.commands)
+        console.print(f"  Commands:    {names}")
+    if m.dependencies:
+        deps = ", ".join(m.dependencies)
+        console.print(f"  Deps:        {deps}")
+    console.print()
 
 
 # --- Single-shot Commands ---

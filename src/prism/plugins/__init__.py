@@ -7,6 +7,15 @@ tools, commands, and integrations.  Plugins are installed to
 
 from __future__ import annotations
 
+from prism.plugins.api import (
+    get_cost_summary,
+    get_registered_commands,
+    get_registered_tools,
+    get_repo_map,
+    log,
+    register_command,
+    register_tool,
+)
 from prism.plugins.manager import (
     PluginError,
     PluginInfo,
@@ -23,4 +32,11 @@ __all__ = [
     "PluginManifest",
     "PluginNotFoundError",
     "PluginValidationError",
+    "get_cost_summary",
+    "get_registered_commands",
+    "get_registered_tools",
+    "get_repo_map",
+    "log",
+    "register_command",
+    "register_tool",
 ]

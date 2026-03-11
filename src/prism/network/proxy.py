@@ -355,6 +355,52 @@ class ProxyManager:
             return config.http_proxy
         return None
 
+    def check_connectivity(self, timeout: float = 5.0) -> bool:
+        """Check internet connectivity via TCP socket probe.
+
+        Tries ``1.1.1.1:53`` (Cloudflare DNS) then ``8.8.8.8:53``
+        (Google DNS) with the given *timeout*.  Returns ``True`` if
+        either succeeds.
+
+        Args:
+            timeout: Per-target TCP connect timeout in seconds.
+                Must be positive; defaults to ``5.0``.
+
+        Returns:
+            ``True`` if at least one probe succeeds, ``False``
+            otherwise.
+        """
+        import socket
+
+        if timeout <= 0:
+            timeout = 5.0
+
+        targets = [("1.1.1.1", 53), ("8.8.8.8", 53)]
+        for host, port in targets:
+            sock: socket.socket | None = None
+            try:
+                sock = socket.socket(
+                    socket.AF_INET, socket.SOCK_STREAM,
+                )
+                sock.settimeout(timeout)
+                sock.connect((host, port))
+                logger.debug(
+                    "connectivity_ok", host=host, port=port,
+                )
+                return True
+            except (TimeoutError, OSError, ConnectionError):
+                logger.debug(
+                    "connectivity_probe_failed",
+                    host=host,
+                    port=port,
+                )
+            finally:
+                if sock is not None:
+                    sock.close()
+
+        logger.warning("connectivity_check_failed")
+        return False
+
     def reload_from_env(self) -> None:
         """Re-read proxy configuration from environment variables.
 
