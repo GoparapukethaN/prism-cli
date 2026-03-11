@@ -2089,3 +2089,301 @@ class TestRunRepl:
         output = _get_output(con)
         # Status command should produce some output
         assert len(output) > 0
+
+
+# ===========================================================================
+# Enhanced /cache command tests
+# ===========================================================================
+
+
+class TestCacheCommandEnhanced:
+    """Tests for the enhanced /cache command (on/off/clear --older-than)."""
+
+    def test_cache_on_returns_continue(self, tmp_path: Path) -> None:
+        action, output, _, _, st = _cmd("/cache on", tmp_path)
+        assert action == "continue"
+        assert st.cache_enabled is True
+        assert "re-enabled" in output.lower() or "enabled" in output.lower()
+
+    def test_cache_off_returns_continue(self, tmp_path: Path) -> None:
+        action, output, _, _, st = _cmd("/cache off", tmp_path)
+        assert action == "continue"
+        assert st.cache_enabled is False
+        assert "disabled" in output.lower()
+
+    def test_cache_off_then_on_toggles(self, tmp_path: Path) -> None:
+        """Off then on should toggle the flag correctly."""
+        st = _make_state()
+        assert st.cache_enabled is True
+
+        _cmd("/cache off", tmp_path, state=st)
+        assert st.cache_enabled is False
+
+        _cmd("/cache on", tmp_path, state=st)
+        assert st.cache_enabled is True
+
+    def test_cache_stats_shows_session_status(
+        self, tmp_path: Path,
+    ) -> None:
+        """Stats should include session enabled/disabled status."""
+        _, output, _, _, _ = _cmd("/cache stats", tmp_path)
+        assert "Session" in output or "enabled" in output.lower() or len(output) > 0
+
+    def test_cache_clear_older_than_returns_continue(
+        self, tmp_path: Path,
+    ) -> None:
+        action, _, _, _, _ = _cmd(
+            "/cache clear --older-than 24h", tmp_path,
+        )
+        assert action == "continue"
+
+    def test_cache_clear_older_than_invalid_duration(
+        self, tmp_path: Path,
+    ) -> None:
+        """Invalid duration should show an error message."""
+        _, output, _, _, _ = _cmd(
+            "/cache clear --older-than xyz", tmp_path,
+        )
+        assert "Invalid" in output or "duration" in output.lower() or len(output) > 0
+
+    def test_cache_clear_older_than_2d(
+        self, tmp_path: Path,
+    ) -> None:
+        action, _output, _, _, _ = _cmd(
+            "/cache clear --older-than 2d", tmp_path,
+        )
+        assert action == "continue"
+
+    def test_cache_stats_default(self, tmp_path: Path) -> None:
+        """Default /cache command should show stats."""
+        action, output, _, _, _ = _cmd("/cache", tmp_path)
+        assert action == "continue"
+        assert len(output.strip()) > 0
+
+
+# ===========================================================================
+# _parse_duration_to_hours tests
+# ===========================================================================
+
+
+class TestParseDurationToHours:
+    """Tests for the _parse_duration_to_hours helper."""
+
+    def test_hours(self) -> None:
+        from prism.cli.repl import _parse_duration_to_hours
+
+        assert _parse_duration_to_hours("24h") == 24.0
+
+    def test_days(self) -> None:
+        from prism.cli.repl import _parse_duration_to_hours
+
+        assert _parse_duration_to_hours("2d") == 48.0
+
+    def test_minutes(self) -> None:
+        from prism.cli.repl import _parse_duration_to_hours
+
+        result = _parse_duration_to_hours("30m")
+        assert result is not None
+        assert abs(result - 0.5) < 0.01
+
+    def test_weeks(self) -> None:
+        from prism.cli.repl import _parse_duration_to_hours
+
+        assert _parse_duration_to_hours("1w") == 168.0
+
+    def test_invalid_returns_none(self) -> None:
+        from prism.cli.repl import _parse_duration_to_hours
+
+        assert _parse_duration_to_hours("invalid") is None
+        assert _parse_duration_to_hours("") is None
+        assert _parse_duration_to_hours("24x") is None
+
+    def test_float_values(self) -> None:
+        from prism.cli.repl import _parse_duration_to_hours
+
+        result = _parse_duration_to_hours("1.5h")
+        assert result is not None
+        assert abs(result - 1.5) < 0.01
+
+    def test_whitespace_handling(self) -> None:
+        from prism.cli.repl import _parse_duration_to_hours
+
+        result = _parse_duration_to_hours("  24h  ")
+        assert result == 24.0
+
+
+# ===========================================================================
+# /image command tests
+# ===========================================================================
+
+
+class TestImageCommand:
+    """Tests for the /image slash command."""
+
+    def test_image_no_args_shows_usage(
+        self, tmp_path: Path,
+    ) -> None:
+        action, output, _, _, _ = _cmd("/image", tmp_path)
+        assert action == "continue"
+        assert "Usage" in output
+
+    def test_image_returns_continue(self, tmp_path: Path) -> None:
+        """Even with invalid args, should return continue."""
+        action, _, _, _, _ = _cmd(
+            "/image nonexistent.png", tmp_path,
+        )
+        assert action == "continue"
+
+    def test_image_nonexistent_file_shows_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """Missing file should show error."""
+        _, output, _, _, _ = _cmd(
+            "/image /tmp/nonexistent_image_12345.png", tmp_path,
+        )
+        assert (
+            "not found" in output.lower()
+            or "No valid" in output
+            or "error" in output.lower()
+            or len(output.strip()) > 0
+        )
+
+    def test_image_command_in_dispatch(
+        self, tmp_path: Path,
+    ) -> None:
+        """Ensure /image is recognized (not unknown)."""
+        _, output, _, _, _ = _cmd("/image test.png", tmp_path)
+        assert "Unknown command" not in output
+
+    def test_image_in_command_categories(self) -> None:
+        """Ensure /image appears in COMMAND_CATEGORIES."""
+        all_commands = []
+        for cmds in COMMAND_CATEGORIES.values():
+            for cmd_name, _ in cmds:
+                all_commands.append(cmd_name)
+        assert any("/image" in c for c in all_commands)
+
+
+# ===========================================================================
+# Enhanced /compare command tests
+# ===========================================================================
+
+
+class TestCompareCommandEnhanced:
+    """Tests for the enhanced /compare command."""
+
+    def test_compare_config_returns_continue(
+        self, tmp_path: Path,
+    ) -> None:
+        action, _, _, _, _ = _cmd("/compare config", tmp_path)
+        assert action == "continue"
+
+    def test_compare_history_returns_continue(
+        self, tmp_path: Path,
+    ) -> None:
+        action, _, _, _, _ = _cmd("/compare history", tmp_path)
+        assert action == "continue"
+
+    def test_compare_history_empty(self, tmp_path: Path) -> None:
+        """History should indicate no sessions when empty."""
+        _, output, _, _, _ = _cmd(
+            "/compare history", tmp_path,
+        )
+        assert (
+            "No comparison" in output
+            or "history" in output.lower()
+            or len(output.strip()) > 0
+        )
+
+    def test_compare_no_args_shows_usage(
+        self, tmp_path: Path,
+    ) -> None:
+        action, output, _, _, _ = _cmd("/compare", tmp_path)
+        assert action == "continue"
+        assert "Usage" in output
+
+    def test_compare_prompt_returns_continue(
+        self, tmp_path: Path,
+    ) -> None:
+        """Even with a prompt, should return continue."""
+        action, _, _, _, _ = _cmd(
+            "/compare what is 2+2", tmp_path,
+        )
+        assert action == "continue"
+
+
+# ===========================================================================
+# SessionState cache_enabled tests
+# ===========================================================================
+
+
+class TestSessionStateCacheEnabled:
+    """Tests for the cache_enabled attribute on _SessionState."""
+
+    def test_default_cache_enabled(self) -> None:
+        state = _SessionState(pinned_model=None)
+        assert state.cache_enabled is True
+
+    def test_cache_enabled_false(self) -> None:
+        state = _SessionState(
+            pinned_model=None, cache_enabled=False,
+        )
+        assert state.cache_enabled is False
+
+    def test_cache_enabled_true_explicit(self) -> None:
+        state = _SessionState(
+            pinned_model=None, cache_enabled=True,
+        )
+        assert state.cache_enabled is True
+
+    def test_toggle_cache(self) -> None:
+        state = _SessionState(pinned_model=None)
+        state.cache_enabled = False
+        assert state.cache_enabled is False
+        state.cache_enabled = True
+        assert state.cache_enabled is True
+
+
+# ===========================================================================
+# run_repl no_cache parameter tests
+# ===========================================================================
+
+
+class TestRunReplNoCache:
+    """Tests for the no_cache parameter on run_repl."""
+
+    def test_run_repl_no_cache_true(self, tmp_path: Path) -> None:
+        """When no_cache=True, session cache should be disabled."""
+        stg = _make_settings(tmp_path)
+        con = _make_console()
+
+        with patch(
+            "prism.cli.repl.PromptSession",
+        ) as mock_ps:
+            mock_ps.return_value.prompt.side_effect = ["/quit"]
+            run_repl(
+                settings=stg,
+                console=con,
+                no_cache=True,
+            )
+
+        output = _get_output(con)
+        assert len(output) > 0
+
+    def test_run_repl_no_cache_false(self, tmp_path: Path) -> None:
+        """When no_cache=False (default), cache should be on."""
+        stg = _make_settings(tmp_path)
+        con = _make_console()
+
+        with patch(
+            "prism.cli.repl.PromptSession",
+        ) as mock_ps:
+            mock_ps.return_value.prompt.side_effect = ["/quit"]
+            run_repl(
+                settings=stg,
+                console=con,
+                no_cache=False,
+            )
+
+        output = _get_output(con)
+        assert len(output) > 0

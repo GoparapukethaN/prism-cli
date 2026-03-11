@@ -109,6 +109,11 @@ def main_callback(
         "--offline",
         help="Disable all cloud providers (Ollama only).",
     ),
+    no_cache: bool = typer.Option(
+        False,
+        "--no-cache",
+        help="Disable response caching.",
+    ),
     project: str | None = typer.Option(
         None,
         "--project",
@@ -133,6 +138,7 @@ def main_callback(
         new_session=new_session,
         budget=budget,
         offline=offline,
+        no_cache=no_cache,
         project=project,
     )
 
@@ -148,6 +154,7 @@ def _start_repl(
     new_session: bool,
     budget: float | None,
     offline: bool,
+    no_cache: bool = False,
     project: str | None = None,
 ) -> None:
     """Initialize and start the interactive REPL."""
@@ -211,7 +218,13 @@ def _start_repl(
     # Start REPL
     from prism.cli.repl import run_repl
 
-    run_repl(settings=settings, console=console, dry_run=dry_run, offline=offline)
+    run_repl(
+        settings=settings,
+        console=console,
+        dry_run=dry_run,
+        offline=offline,
+        no_cache=no_cache,
+    )
 
 
 def _configure_logging(level: str) -> None:

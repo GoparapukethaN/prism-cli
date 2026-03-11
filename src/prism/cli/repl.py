@@ -12,6 +12,7 @@ startup time fast.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -44,25 +45,32 @@ COMMAND_CATEGORIES: dict[str, list[tuple[str, str]]] = {
     ],
     "Model & Routing": [
         ("/model [name]", "Show or set the current model"),
-        ("/compare <prompt>", "Compare models side-by-side"),
+        ("/compare <prompt|config|history>",
+         "Compare models side-by-side"),
         ("/debate <prompt>", "Multi-model debate on a question"),
     ],
     "Context & Files": [
         ("/add <files>", "Add files to context"),
-        ("/drop [files]", "Remove files from context / list active"),
+        ("/drop [files]",
+         "Remove files from context / list active"),
+        ("/image <path> [prompt]",
+         "Attach image for vision analysis"),
         ("/compact", "Compress conversation history"),
-        ("/branch [create|switch|list|delete] [name]",
-         "Conversation branching"),
-        ("/budget [status|set] [tokens]", "Context budget management"),
+        ("/branch <name>",
+         "Create / list / switch / merge / delete / save"),
+        ("/budget [status|set] [tokens]",
+         "Context budget management"),
     ],
     "Cost & Budget": [
         ("/cost", "Show cost dashboard"),
         ("/forecast", "Monthly cost forecast and model drivers"),
-        ("/cache [stats|clear]", "Cache management"),
+        ("/cache [stats|clear|on|off]", "Cache management"),
     ],
     "Tools & Execution": [
-        ("/sandbox <code>", "Execute code in sandbox"),
-        ("/tasks [list|cancel] [id]", "Background task management"),
+        ("/sandbox <code|on|off|status>",
+         "Sandbox execution with language detection"),
+        ("/tasks [list|cancel] [id]",
+         "Background task management"),
         ("/web on|off", "Toggle web browsing"),
     ],
     "Code Intelligence": [
@@ -82,9 +90,10 @@ COMMAND_CATEGORIES: dict[str, list[tuple[str, str]]] = {
         ("/architect rollback [id]", "Rollback a plan"),
     ],
     "Infrastructure": [
-        ("/undo", "Undo last file change"),
-        ("/rollback [list|undo|restore] [id]",
-         "Rollback history management"),
+        ("/undo [N|all]",
+         "Undo last N changes with diff"),
+        ("/rollback [list|diff|restore] [N|hash]",
+         "Session timeline and rollback"),
         ("/privacy [on|off|status]", "Privacy mode (local-only)"),
         ("/plugins [list|install|remove] [name]",
          "Plugin management"),
@@ -108,14 +117,24 @@ class _SessionState:
         pinned_model: User-pinned model override, or ``None``.
         web_enabled: Whether web browsing is enabled.
         session_id: Unique session identifier.
+        cache_enabled: Whether response caching is active.
+        sandbox_enabled: Whether sandbox execution is active.
+        sandbox_type: Forced sandbox type (``None`` = auto).
     """
 
-    def __init__(self, pinned_model: str | None) -> None:
+    def __init__(
+        self,
+        pinned_model: str | None,
+        cache_enabled: bool = True,
+    ) -> None:
         self.active_files: list[str] = []
         self.conversation: list[dict[str, str]] = []
         self.pinned_model: str | None = pinned_model
         self.web_enabled: bool = False
         self.session_id: str = ""
+        self.cache_enabled: bool = cache_enabled
+        self.sandbox_enabled: bool = True
+        self.sandbox_type: str | None = None
 
 
 # ======================================================================
@@ -127,6 +146,7 @@ def run_repl(
     console: Console,
     dry_run: bool = False,
     offline: bool = False,
+    no_cache: bool = False,
 ) -> None:
     """Run the interactive REPL loop.
 
@@ -135,6 +155,7 @@ def run_repl(
         console: Rich console for output.
         dry_run: If True, show routing decisions without executing.
         offline: If True, only use local models.
+        no_cache: If True, disable response caching.
     """
     history_path = settings.sessions_dir / "repl_history"
     history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -153,7 +174,10 @@ def run_repl(
         enable_history_search=True,
     )
 
-    state = _SessionState(pinned_model=settings.config.pinned_model)
+    state = _SessionState(
+        pinned_model=settings.config.pinned_model,
+        cache_enabled=not no_cache,
+    )
 
     # Generate a stable session id
     from uuid import uuid4
@@ -254,6 +278,7 @@ def _dispatch_command(
         "/clear": _cmd_clear,
         "/cache": _cmd_cache,
         "/compare": _cmd_compare,
+        "/image": _cmd_image,
         "/branch": _cmd_branch,
         "/rollback": _cmd_rollback,
         "/sandbox": _cmd_sandbox,
@@ -475,21 +500,109 @@ def _cmd_undo(
     settings: Settings,
     **_: Any,
 ) -> str:
-    """Undo last file change via RollbackManager."""
+    """Undo file changes via RollbackManager.
+
+    Supports:
+        /undo       -- undo the last change, show diff
+        /undo N     -- undo the last N changes with summary
+        /undo all   -- undo every change this session
+    """
     try:
         from prism.git.history import RollbackManager
 
         manager = RollbackManager(settings.project_root)
         manager.start_session()
-        reverted = manager.undo(count=1)
 
-        if reverted:
+        arg = args.strip().lower()
+
+        # Determine undo count
+        if arg == "all":
+            count = manager.change_count
+            if count == 0:
+                console.print(
+                    "[dim]No changes to undo.[/dim]"
+                )
+                return "continue"
+        elif arg and arg.isdigit():
+            count = int(arg)
+            if count < 1:
+                console.print(
+                    "[yellow]Count must be at least 1.[/]"
+                )
+                return "continue"
+        elif arg:
+            console.print(
+                "[yellow]Usage:[/] "
+                "/undo [N | all]"
+            )
+            return "continue"
+        else:
+            count = 1
+
+        # Capture change records before undoing for display
+        timeline = manager.get_timeline()
+        changes_to_undo = timeline.changes[-count:]
+
+        reverted = manager.undo(count=count)
+
+        if not reverted:
+            console.print("[dim]Nothing to undo.[/dim]")
+            return "continue"
+
+        # Show summary table for multi-undo
+        if len(reverted) > 1:
+            table = Table(
+                title=f"Undone {len(reverted)} Changes",
+            )
+            table.add_column(
+                "Hash", style="cyan", width=10,
+            )
+            table.add_column("Files Affected")
+            table.add_column("+/-", justify="right")
+
+            for change in reversed(changes_to_undo):
+                files_str = ", ".join(
+                    change.files_changed[:3],
+                )
+                if len(change.files_changed) > 3:
+                    extra = len(change.files_changed) - 3
+                    files_str += f" (+{extra} more)"
+                table.add_row(
+                    change.short_hash,
+                    files_str or "(unknown)",
+                    f"+{change.insertions}"
+                    f"/-{change.deletions}",
+                )
+            console.print(table)
+        else:
+            # Single undo -- show affected files
             console.print(
                 f"[green]Undone 1 change "
                 f"(commit {reverted[0][:8]}).[/]"
             )
-        else:
-            console.print("[dim]Nothing to undo.[/dim]")
+            if changes_to_undo:
+                ch = changes_to_undo[0]
+                for fname in ch.files_changed:
+                    console.print(f"  [dim]{fname}[/dim]")
+
+        # Show diff of last undone change
+        try:
+            if changes_to_undo:
+                last = changes_to_undo[-1]
+                diff_text = manager.get_diff(
+                    last.index,
+                )
+                if diff_text.strip():
+                    console.print(
+                        Panel(
+                            diff_text,
+                            title="[bold]Diff (last undone)[/bold]",
+                            border_style="yellow",
+                        )
+                    )
+        except (ValueError, RuntimeError):
+            pass  # Diff display is best-effort
+
     except ValueError as exc:
         console.print(f"[yellow]{exc}[/]")
     except RuntimeError as exc:
@@ -551,34 +664,110 @@ def _cmd_clear(
         f"[dim]Conversation cleared ({count} messages removed).[/dim]"
     )
     return "continue"
+def _parse_duration_to_hours(duration: str) -> float | None:
+    """Parse a human-readable duration into hours.
+
+    Supports ``"30m"``, ``"24h"``, ``"2d"``, ``"1w"``.
+
+    Args:
+        duration: Duration string with a numeric value
+            followed by a unit character.
+
+    Returns:
+        Hours as a float, or ``None`` if parsing fails.
+    """
+    import re
+
+    match = re.fullmatch(
+        r"(\d+(?:\.\d+)?)\s*([mhdw])", duration.strip(),
+    )
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2)
+    multipliers: dict[str, float] = {
+        "m": 1.0 / 60,
+        "h": 1.0,
+        "d": 24.0,
+        "w": 168.0,
+    }
+    return value * multipliers[unit]
 
 
 def _cmd_cache(
     args: str,
     console: Console,
     settings: Settings,
+    state: _SessionState,
     **_: Any,
 ) -> str:
-    """Cache management — show stats or clear."""
+    """Cache management -- stats, clear, on/off.
+
+    Subcommands:
+        ``/cache`` or ``/cache stats`` -- show statistics.
+        ``/cache clear`` -- remove all entries.
+        ``/cache clear --older-than <dur>`` -- clear entries
+        older than duration (``24h``, ``2d``, ``30m``).
+        ``/cache off`` -- disable caching for this session.
+        ``/cache on`` -- re-enable caching.
+    """
     try:
         from prism.cache.response_cache import ResponseCache
+
+        sub = args.strip()
+        sub_lower = sub.lower()
+
+        # --- on / off toggling ---
+        if sub_lower == "off":
+            state.cache_enabled = False
+            console.print(
+                "[yellow]Cache disabled for this session.[/]"
+            )
+            return "continue"
+
+        if sub_lower == "on":
+            state.cache_enabled = True
+            console.print(
+                "[green]Cache re-enabled for this session.[/]"
+            )
+            return "continue"
 
         cache = ResponseCache(
             cache_dir=settings.cache_dir,
             enabled=True,
         )
 
-        sub = args.lower().strip()
-
-        if sub == "clear":
-            deleted = cache.clear()
-            console.print(
-                f"[green]Cache cleared: {deleted} entries removed.[/]"
-            )
+        # --- clear with optional --older-than ---
+        if sub_lower.startswith("clear"):
+            remainder = sub[5:].strip()
+            if remainder.lower().startswith("--older-than"):
+                dur_str = remainder[
+                    len("--older-than"):
+                ].strip()
+                hours = _parse_duration_to_hours(dur_str)
+                if hours is None:
+                    console.print(
+                        "[yellow]Invalid duration. "
+                        "Use e.g. 30m, 24h, 2d, 1w[/]"
+                    )
+                    cache.close()
+                    return "continue"
+                max_h = max(int(hours), 1) if hours >= 1 else 1
+                deleted = cache.clear(max_age_hours=max_h)
+                console.print(
+                    f"[green]Cleared {deleted} entries "
+                    f"older than {dur_str}.[/]"
+                )
+            else:
+                deleted = cache.clear()
+                console.print(
+                    f"[green]Cache cleared: "
+                    f"{deleted} entries removed.[/]"
+                )
             cache.close()
             return "continue"
 
-        # Default: show stats
+        # --- stats (default) ---
         stats = cache.get_stats()
 
         table = Table(
@@ -593,17 +782,38 @@ def _cmd_cache(
         table.add_row("Entries", str(stats.total_entries))
         table.add_row("Hits", str(stats.total_hits))
         table.add_row("Misses", str(stats.total_misses))
-        table.add_row("Hit rate", f"{stats.hit_rate:.1%}")
-        table.add_row("Tokens saved", f"{stats.tokens_saved:,}")
-        table.add_row("Cost saved", f"${stats.cost_saved:.4f}")
+        table.add_row(
+            "Hit rate", f"{stats.hit_rate:.1%}",
+        )
+        table.add_row(
+            "Tokens saved", f"{stats.tokens_saved:,}",
+        )
+        table.add_row(
+            "Cost saved", f"${stats.cost_saved:.4f}",
+        )
 
         size_kb = stats.cache_size_bytes / 1024
-        table.add_row("DB size", f"{size_kb:.1f} KB")
+        if size_kb >= 1024:
+            table.add_row(
+                "DB size", f"{size_kb / 1024:.1f} MB",
+            )
+        else:
+            table.add_row("DB size", f"{size_kb:.1f} KB")
 
         if stats.oldest_entry:
-            table.add_row("Oldest", stats.oldest_entry[:19])
+            table.add_row(
+                "Oldest", stats.oldest_entry[:19],
+            )
         if stats.newest_entry:
-            table.add_row("Newest", stats.newest_entry[:19])
+            table.add_row(
+                "Newest", stats.newest_entry[:19],
+            )
+
+        enabled_label = (
+            "[green]enabled[/]" if state.cache_enabled
+            else "[yellow]disabled[/]"
+        )
+        table.add_row("Session", enabled_label)
 
         console.print(Panel(table, border_style="blue"))
         cache.close()
@@ -620,15 +830,28 @@ def _cmd_compare(
     settings: Settings,
     **_: Any,
 ) -> str:
-    """Compare models side-by-side."""
+    """Compare models side-by-side.
+
+    Subcommands:
+        ``/compare <prompt>`` -- run comparison (shows
+        estimated cost first).
+        ``/compare config`` -- show / change comparison models.
+        ``/compare history`` -- show past sessions with winners.
+    """
     if not args:
         console.print(
-            "[yellow]Usage:[/] /compare <prompt to send to all models>"
+            "[yellow]Usage:[/] "
+            "/compare <prompt|config|history>"
         )
         return "continue"
 
+    sub_lower = args.strip().lower()
+
     try:
-        from prism.cli.compare import ModelComparator
+        from prism.cli.compare import (
+            MODEL_DISPLAY_NAMES,
+            ModelComparator,
+        )
         from prism.llm.completion import CompletionEngine
 
         engine = CompletionEngine(settings=settings)
@@ -637,7 +860,88 @@ def _cmd_compare(
             console=console,
         )
 
-        console.print("[dim]Running comparison across models...[/]")
+        # --- /compare config ---
+        if sub_lower == "config":
+            comparator.display_config()
+            console.print(
+                "[dim]Change models with:[/] "
+                "/model <name> then /compare <prompt>"
+            )
+            return "continue"
+
+        # --- /compare history ---
+        if sub_lower == "history":
+            history = comparator.history
+            if not history:
+                console.print(
+                    "[dim]No comparison history yet.[/dim]"
+                )
+                return "continue"
+
+            table = Table(title="Comparison History")
+            table.add_column("#", style="dim", width=4)
+            table.add_column("Prompt", min_width=30)
+            table.add_column(
+                "Models", justify="right",
+            )
+            table.add_column(
+                "Winner", style="green",
+            )
+            table.add_column(
+                "Cost", justify="right",
+            )
+            table.add_column("Date")
+
+            for i, sess in enumerate(history, 1):
+                winner_name = (
+                    sess.winner.display_name
+                    if sess.winner else "-"
+                )
+                table.add_row(
+                    str(i),
+                    sess.prompt[:40],
+                    str(len(sess.results)),
+                    winner_name,
+                    f"${sess.total_cost:.4f}",
+                    sess.created_at[:19],
+                )
+            console.print(table)
+            return "continue"
+
+        # --- /compare <prompt> (default) ---
+        # Show estimated cost before running
+        from prism.cost.pricing import get_model_pricing
+
+        models = comparator.models
+        est_lines: list[str] = []
+        total_est = 0.0
+        for mdl in models:
+            display = MODEL_DISPLAY_NAMES.get(mdl, mdl)
+            try:
+                pricing = get_model_pricing(mdl)
+                # Rough estimate: ~500 input + ~500 output tokens
+                est = (
+                    500 * pricing.input_cost_per_token
+                    + 500 * pricing.output_cost_per_token
+                )
+                total_est += est
+                est_lines.append(
+                    f"  {display}: ~${est:.4f}"
+                )
+            except (ValueError, KeyError):
+                est_lines.append(
+                    f"  {display}: (pricing unavailable)"
+                )
+
+        console.print(
+            f"[dim]Estimated cost: ~${total_est:.4f}[/]"
+        )
+        for line in est_lines:
+            console.print(f"[dim]{line}[/]")
+
+        console.print(
+            "[dim]Running comparison across models...[/]"
+        )
         session = asyncio.get_event_loop().run_until_complete(
             comparator.compare(args)
         )
@@ -652,6 +956,208 @@ def _cmd_compare(
     return "continue"
 
 
+
+
+def _cmd_image(
+    args: str,
+    console: Console,
+    settings: Settings,
+    state: _SessionState,
+    **_: Any,
+) -> str:
+    """Attach image(s) for vision model analysis.
+
+    Usage:
+        ``/image <path> [prompt]`` -- single image with optional
+        prompt text.
+        ``/image img1.png img2.png "Compare these"`` -- multiple
+        images with a quoted prompt at the end.
+
+    Auto-routes to a vision-capable model if the current model
+    does not support images.
+    """
+    if not args:
+        console.print(
+            "[yellow]Usage:[/] /image <path> [prompt]\n"
+            "[dim]Example: /image screenshot.png "
+            "What does this show?[/dim]"
+        )
+        return "continue"
+
+    try:
+        import shlex
+        from pathlib import Path
+
+        from prism.tools.vision import (
+            ALL_VISION_MODELS,
+            build_multimodal_messages,
+            detect_terminal_image_support,
+            display_image_preview,
+            is_vision_model,
+            process_image,
+        )
+
+        # Parse arguments: split on spaces but respect quotes
+        try:
+            tokens = shlex.split(args)
+        except ValueError:
+            tokens = args.split()
+
+        # Separate image paths from prompt text
+        image_paths: list[Path] = []
+        prompt_parts: list[str] = []
+
+        for token in tokens:
+            p = Path(token).expanduser()
+            if p.suffix.lower() in {
+                ".jpg", ".jpeg", ".png", ".gif",
+                ".webp", ".bmp", ".tiff", ".tif",
+            } or p.is_file():
+                image_paths.append(p)
+            else:
+                prompt_parts.append(token)
+
+        if not image_paths:
+            console.print(
+                "[yellow]No valid image paths found.[/]\n"
+                "[dim]Supported: jpg, png, gif, webp, bmp, "
+                "tiff[/dim]"
+            )
+            return "continue"
+
+        # Validate all paths exist
+        for img_path in image_paths:
+            if not img_path.is_file():
+                console.print(
+                    f"[red]File not found:[/] {img_path}"
+                )
+                return "continue"
+
+        prompt_text = (
+            " ".join(prompt_parts)
+            if prompt_parts
+            else "Describe this image in detail."
+        )
+
+        # Process images
+        attachments = []
+        for img_path in image_paths:
+            att = process_image(img_path)
+            attachments.append(att)
+            size_str = (
+                f"{att.size_bytes / 1024:.1f} KB"
+                if att.size_bytes < 1_048_576
+                else f"{att.size_bytes / 1_048_576:.1f} MB"
+            )
+            dim_str = (
+                f"{att.width}x{att.height}"
+                if att.width > 0 else "unknown"
+            )
+            compressed = (
+                " [yellow](compressed)[/]"
+                if att.was_compressed else ""
+            )
+            console.print(
+                f"  [green]+[/] {img_path.name} "
+                f"({dim_str}, {size_str}){compressed}"
+            )
+
+        # Show inline preview if terminal supports it
+        protocol = detect_terminal_image_support()
+        if protocol:
+            for img_path in image_paths:
+                display_image_preview(img_path, protocol)
+
+        # Determine vision model
+        current_model = state.pinned_model or ""
+        if current_model and is_vision_model(current_model):
+            vision_model = current_model
+        else:
+            # Auto-select cheapest vision model
+            vision_model = "gemini/gemini-2.0-flash"
+            # Check if any vision model is available
+            for candidate in ALL_VISION_MODELS:
+                if "flash" in candidate.lower():
+                    vision_model = candidate
+                    break
+            if current_model:
+                console.print(
+                    f"[yellow]Model {current_model} does not "
+                    f"support vision. "
+                    f"Using {vision_model}.[/]"
+                )
+
+        console.print(
+            f"[dim]Vision model: {vision_model}[/]"
+        )
+
+        # Build multimodal message content
+        provider = "openai"  # default format
+        if "claude" in vision_model.lower():
+            provider = "anthropic"
+        elif "gemini" in vision_model.lower():
+            provider = "google"
+
+        content = build_multimodal_messages(
+            text_prompt=prompt_text,
+            images=attachments,
+            provider=provider,
+        )
+
+        # Send through completion engine
+        from prism.llm.completion import CompletionEngine
+
+        engine = CompletionEngine(settings=settings)
+
+        messages = list(state.conversation)
+        messages.append({
+            "role": "user",
+            "content": content,
+        })
+
+        from rich.markdown import Markdown
+
+        result = asyncio.get_event_loop().run_until_complete(
+            engine.complete(
+                messages=messages,
+                model=vision_model,
+            )
+        )
+
+        resp_content = getattr(result, "content", "")
+        if resp_content:
+            state.conversation.append({
+                "role": "user",
+                "content": f"[image: {', '.join(str(p) for p in image_paths)}] {prompt_text}",
+            })
+            state.conversation.append({
+                "role": "assistant",
+                "content": resp_content,
+            })
+            console.print(
+                Panel(
+                    Markdown(resp_content),
+                    border_style="blue",
+                )
+            )
+
+        cost = getattr(result, "cost_usd", 0.0)
+        tokens_in = getattr(result, "input_tokens", 0)
+        tokens_out = getattr(result, "output_tokens", 0)
+        console.print(
+            f"[dim]{vision_model} | "
+            f"{tokens_in}+{tokens_out} tokens | "
+            f"${cost:.4f}[/dim]\n"
+        )
+
+    except ValueError as exc:
+        console.print(f"[yellow]{exc}[/]")
+    except Exception as exc:
+        logger.debug("image_error", error=str(exc))
+        console.print(f"[red]Image error:[/] {exc}")
+    return "continue"
+
+
 def _cmd_branch(
     args: str,
     console: Console,
@@ -659,7 +1165,20 @@ def _cmd_branch(
     state: _SessionState,
     **_: Any,
 ) -> str:
-    """Conversation branching — create, switch, list, delete."""
+    """Conversation branching with full lifecycle.
+
+    Supports:
+        /branch <name>         -- create a new branch
+        /branch list           -- list all branches
+        /branch switch <name>  -- switch to a branch
+        /branch merge <name>   -- merge branch into current
+        /branch delete <name>  -- delete a branch
+        /branch save           -- mark current branch persistent
+
+    Max 20 branches per session.
+    """
+    max_branches = 20
+
     try:
         from prism.context.branching import BranchManager
 
@@ -670,42 +1189,63 @@ def _cmd_branch(
         sub = parts[0].lower() if parts else "list"
         name = parts[1].strip() if len(parts) > 1 else ""
 
-        if sub == "create":
-            if not name:
-                console.print(
-                    "[yellow]Usage:[/] /branch create <name>"
-                )
-                return "continue"
-            meta = manager.create_branch(
-                name=name,
-                current_messages=state.conversation,
-            )
-            console.print(
-                f"[green]Branch '{meta.name}' created "
-                f"(forked from '{meta.parent_branch}' at "
-                f"message {meta.fork_point_index}).[/]"
-            )
+        if sub == "list":
+            _branch_list(manager, console)
 
         elif sub == "switch":
             if not name:
                 console.print(
-                    "[yellow]Usage:[/] /branch switch <name>"
+                    "[yellow]Usage:[/] "
+                    "/branch switch <name>"
                 )
                 return "continue"
             msgs = manager.switch_branch(
                 name=name,
                 current_messages=state.conversation,
             )
-            state.conversation = msgs
+            state.conversation = list(msgs)
+
+            # Restore active files from branch
+            branch = manager.get_branch(name)
+            state.active_files = list(
+                branch.file_edits,
+            )
+
             console.print(
                 f"[green]Switched to branch '{name}' "
                 f"({len(msgs)} messages).[/]"
             )
 
+        elif sub == "merge":
+            if not name:
+                console.print(
+                    "[yellow]Usage:[/] "
+                    "/branch merge <name>"
+                )
+                return "continue"
+            source = manager.get_branch(name)
+            fork_idx = source.metadata.fork_point_index
+            new_msg_count = max(
+                0, len(source.messages) - fork_idx,
+            )
+
+            merged = manager.merge_branch(
+                source_name=name,
+                current_messages=state.conversation,
+            )
+            state.conversation = list(merged)
+
+            console.print(
+                f"[green]Merged '{name}' into "
+                f"'{manager.active_branch}' "
+                f"({new_msg_count} new messages).[/]"
+            )
+
         elif sub == "delete":
             if not name:
                 console.print(
-                    "[yellow]Usage:[/] /branch delete <name>"
+                    "[yellow]Usage:[/] "
+                    "/branch delete <name>"
                 )
                 return "continue"
             manager.delete_branch(name)
@@ -713,34 +1253,74 @@ def _cmd_branch(
                 f"[green]Branch '{name}' deleted.[/]"
             )
 
-        else:
-            # list
-            branches = manager.list_branches()
-            if not branches:
+        elif sub == "save":
+            # Mark the current branch as persistent
+            active_name = manager.active_branch
+            if active_name in (
+                br.name for br in manager.list_branches()
+            ):
+                branch = manager.get_branch(active_name)
+                branch.metadata.description = (
+                    branch.metadata.description
+                    or "(persistent)"
+                )
+                manager._save_branch(active_name)
                 console.print(
-                    "[dim]No branches. "
-                    "Use /branch create <name>.[/dim]"
+                    f"[green]Branch '{active_name}' "
+                    f"marked as persistent.[/]"
+                )
+            else:
+                console.print(
+                    "[yellow]No active branch to save.[/]"
+                )
+
+        elif sub in ("create", ""):
+            # Any non-keyword argument is treated as
+            # a branch name (create)
+            branch_name = name if sub == "create" else sub
+            if not branch_name or branch_name == "list":
+                _branch_list(manager, console)
+                return "continue"
+
+            if manager.branch_count >= max_branches:
+                console.print(
+                    f"[red]Branch limit reached "
+                    f"({max_branches}). "
+                    f"Delete a branch first.[/]"
                 )
                 return "continue"
 
-            table = Table(title="Conversation Branches")
-            table.add_column("Name", style="cyan")
-            table.add_column("Active", justify="center")
-            table.add_column("Messages", justify="right")
-            table.add_column("Parent")
-            table.add_column("Created")
+            meta = manager.create_branch(
+                name=branch_name,
+                current_messages=state.conversation,
+            )
+            console.print(
+                f"[green]Branch '{meta.name}' created "
+                f"(forked from '{meta.parent_branch}' "
+                f"at message "
+                f"{meta.fork_point_index}).[/]"
+            )
 
-            active = manager.active_branch
-            for b in branches:
-                marker = "[green]>[/]" if b.name == active else ""
-                table.add_row(
-                    b.name,
-                    marker,
-                    str(b.message_count),
-                    b.parent_branch,
-                    b.created_at[:19],
+        else:
+            # Bare name treated as branch creation
+            if manager.branch_count >= max_branches:
+                console.print(
+                    f"[red]Branch limit reached "
+                    f"({max_branches}). "
+                    f"Delete a branch first.[/]"
                 )
-            console.print(table)
+                return "continue"
+
+            meta = manager.create_branch(
+                name=sub,
+                current_messages=state.conversation,
+            )
+            console.print(
+                f"[green]Branch '{meta.name}' created "
+                f"(forked from '{meta.parent_branch}' "
+                f"at message "
+                f"{meta.fork_point_index}).[/]"
+            )
 
     except ValueError as exc:
         console.print(f"[yellow]{exc}[/]")
@@ -750,13 +1330,62 @@ def _cmd_branch(
     return "continue"
 
 
+def _branch_list(
+    manager: Any,
+    console: Console,
+) -> None:
+    """Display all conversation branches as a Rich table.
+
+    Args:
+        manager: A :class:`BranchManager` instance.
+        console: Rich console for output.
+    """
+    branches = manager.list_branches()
+    if not branches:
+        console.print(
+            "[dim]No branches. "
+            "Use /branch <name> to create one.[/dim]"
+        )
+        return
+
+    table = Table(title="Conversation Branches")
+    table.add_column("Name", style="cyan")
+    table.add_column("Active", justify="center")
+    table.add_column("Messages", justify="right")
+    table.add_column("Parent")
+    table.add_column("Description")
+    table.add_column("Created")
+
+    active = manager.active_branch
+    for b in branches:
+        marker = (
+            "[green]>[/]" if b.name == active else ""
+        )
+        table.add_row(
+            b.name,
+            marker,
+            str(b.message_count),
+            b.parent_branch,
+            b.description[:30] if b.description else "",
+            b.created_at[:19],
+        )
+    console.print(table)
+
+
 def _cmd_rollback(
     args: str,
     console: Console,
     settings: Settings,
     **_: Any,
 ) -> str:
-    """Rollback history — list changes, undo, or restore."""
+    """Rollback history management.
+
+    Supports:
+        /rollback           -- show session timeline
+        /rollback list      -- show session timeline
+        /rollback diff <N>  -- show coloured diff of Nth change
+        /rollback restore <hash> -- restore to a commit hash
+    """
     try:
         from prism.git.history import RollbackManager
 
@@ -767,46 +1396,108 @@ def _cmd_rollback(
         sub = parts[0].lower() if parts else "list"
         extra = parts[1].strip() if len(parts) > 1 else ""
 
-        if sub == "list":
+        if sub in ("list", ""):
             timeline = manager.get_timeline()
             if not timeline.changes:
                 console.print(
-                    "[dim]No changes recorded this session.[/dim]"
+                    "[dim]No changes recorded "
+                    "this session.[/dim]"
                 )
                 return "continue"
 
             table = Table(title="Session Timeline")
-            table.add_column("#", style="dim", width=4)
+            table.add_column(
+                "#", style="dim", width=4,
+            )
             table.add_column("Hash", style="cyan")
             table.add_column("Message")
-            table.add_column("Files", justify="right")
-            table.add_column("+/-", justify="right")
+            table.add_column(
+                "Files", justify="right",
+            )
+            table.add_column(
+                "+/-", justify="right",
+            )
+            table.add_column("File Names")
             table.add_column("Timestamp")
 
             for ch in timeline.changes:
+                files_display = ", ".join(
+                    ch.files_changed[:3],
+                )
+                if len(ch.files_changed) > 3:
+                    remain = len(ch.files_changed) - 3
+                    files_display += f" (+{remain})"
                 table.add_row(
                     str(ch.index),
                     ch.short_hash,
                     ch.message[:50],
                     str(len(ch.files_changed)),
-                    f"+{ch.insertions}/-{ch.deletions}",
+                    f"+{ch.insertions}"
+                    f"/-{ch.deletions}",
+                    files_display,
                     ch.timestamp[:19],
                 )
             console.print(table)
 
-        elif sub == "undo":
-            count = int(extra) if extra.isdigit() else 1
-            reverted = manager.undo(count=count)
+        elif sub == "diff":
+            if not extra or not extra.isdigit():
+                console.print(
+                    "[yellow]Usage:[/] "
+                    "/rollback diff <change-number>"
+                )
+                return "continue"
+
+            change_idx = int(extra)
+            change = manager.get_change(change_idx)
+            diff_text = manager.get_diff(change_idx)
+
+            # Show header with change info
             console.print(
-                f"[green]Reverted {len(reverted)} change(s).[/]"
+                f"\n[bold]Change #{change.index}[/bold] "
+                f"[cyan]{change.short_hash}[/cyan] "
+                f"-- {change.message}"
             )
+            for fname in change.files_changed:
+                console.print(f"  [dim]{fname}[/dim]")
+
+            if diff_text.strip():
+                console.print(
+                    Panel(
+                        diff_text,
+                        title=(
+                            f"[bold]Diff #{change_idx}"
+                            f"[/bold]"
+                        ),
+                        border_style="yellow",
+                    )
+                )
+            else:
+                console.print(
+                    "[dim]No diff available.[/dim]"
+                )
 
         elif sub == "restore":
             if not extra:
                 console.print(
-                    "[yellow]Usage:[/] /rollback restore <commit-hash>"
+                    "[yellow]Usage:[/] "
+                    "/rollback restore <commit-hash>"
                 )
                 return "continue"
+
+            # Show preview first
+            preview = manager.get_restore_preview(extra)
+            if preview.strip():
+                console.print(
+                    Panel(
+                        preview,
+                        title=(
+                            "[bold]Restore Preview"
+                            "[/bold]"
+                        ),
+                        border_style="cyan",
+                    )
+                )
+
             new_hash = manager.restore(extra)
             console.print(
                 f"[green]Restored to {extra[:8]}. "
@@ -815,7 +1506,9 @@ def _cmd_rollback(
 
         else:
             console.print(
-                "[yellow]Usage:[/] /rollback [list|undo|restore] [id]"
+                "[yellow]Usage:[/] "
+                "/rollback [list|diff|restore] "
+                "[N|hash]"
             )
 
     except ValueError as exc:
@@ -831,41 +1524,125 @@ def _cmd_rollback(
 def _cmd_sandbox(
     args: str,
     console: Console,
+    state: _SessionState,
     **_: Any,
 ) -> str:
-    """Execute code in the sandbox."""
+    """Code sandbox execution with language auto-detection.
+
+    Supports:
+        /sandbox <code>       -- execute code in sandbox
+        /sandbox on           -- enable sandbox execution
+        /sandbox off          -- disable sandbox execution
+        /sandbox docker       -- force Docker sandbox type
+        /sandbox subprocess   -- force subprocess sandbox type
+        /sandbox status       -- show sandbox configuration
+    """
     if not args:
         console.print(
-            "[yellow]Usage:[/] /sandbox <python code>\n"
-            "[dim]Example: /sandbox print('hello world')[/dim]"
+            "[yellow]Usage:[/] "
+            "/sandbox <code> | on | off | "
+            "docker | subprocess | status\n"
+            "[dim]Example: "
+            "/sandbox print('hello')[/dim]"
+        )
+        return "continue"
+
+    arg_lower = args.strip().lower()
+
+    # --- Toggle commands ---
+    if arg_lower == "on":
+        state.sandbox_enabled = True
+        console.print(
+            "[green]Sandbox execution enabled.[/]"
+        )
+        return "continue"
+
+    if arg_lower == "off":
+        state.sandbox_enabled = False
+        console.print(
+            "[yellow]Sandbox execution disabled.[/]"
+        )
+        return "continue"
+
+    if arg_lower == "docker":
+        state.sandbox_type = "docker"
+        console.print(
+            "[green]Sandbox type forced to Docker.[/]"
+        )
+        return "continue"
+
+    if arg_lower == "subprocess":
+        state.sandbox_type = "subprocess"
+        console.print(
+            "[green]Sandbox type forced to "
+            "subprocess.[/]"
+        )
+        return "continue"
+
+    if arg_lower == "status":
+        _sandbox_status(state, console)
+        return "continue"
+
+    # --- Execute code ---
+    if not state.sandbox_enabled:
+        console.print(
+            "[yellow]Sandbox is disabled. "
+            "Use /sandbox on to enable.[/]"
         )
         return "continue"
 
     try:
         from prism.tools.code_sandbox import CodeSandbox
 
-        sandbox = CodeSandbox(timeout=30, enabled=True)
-        result = sandbox.execute(args, language="python")
+        language = _detect_language(args)
 
-        style = "green" if result.exit_code == 0 else "red"
+        sandbox = CodeSandbox(
+            timeout=30, enabled=True,
+        )
+
+        # Force sandbox type if user requested it
+        if state.sandbox_type == "docker":
+            sandbox._docker_available = True
+        elif state.sandbox_type == "subprocess":
+            sandbox._docker_available = False
+
+        result = sandbox.execute(
+            args, language=language,
+        )
+
+        style = (
+            "green" if result.exit_code == 0 else "red"
+        )
         header = (
-            f"[{style}]Exit: {result.exit_code}[/{style}] | "
+            f"[{style}]Exit: {result.exit_code}"
+            f"[/{style}] | "
             f"{result.execution_time_ms:.0f}ms | "
-            f"{result.sandbox_type}"
+            f"{result.sandbox_type} | "
+            f"{language}"
         )
 
         output_parts: list[str] = []
         if result.stdout:
             output_parts.append(result.stdout)
         if result.stderr:
-            output_parts.append(f"[stderr]\n{result.stderr}")
+            output_parts.append(
+                f"[stderr]\n{result.stderr}"
+            )
         if result.timed_out:
             output_parts.append("[Timed out]")
         if result.memory_exceeded:
-            output_parts.append("[Memory limit exceeded]")
+            output_parts.append(
+                "[Memory limit exceeded]"
+            )
 
-        body = "\n".join(output_parts) if output_parts else "(no output)"
-        console.print(Panel(body, title=header, border_style=style))
+        body = (
+            "\n".join(output_parts)
+            if output_parts
+            else "(no output)"
+        )
+        console.print(
+            Panel(body, title=header, border_style=style)
+        )
 
     except RuntimeError as exc:
         console.print(f"[yellow]{exc}[/]")
@@ -877,15 +1654,143 @@ def _cmd_sandbox(
     return "continue"
 
 
+def _detect_language(code: str) -> str:
+    """Auto-detect programming language from code.
+
+    Inspects the first non-blank line for common patterns.
+
+    Args:
+        code: Source code string.
+
+    Returns:
+        A language identifier (e.g. ``"python"``).
+    """
+    first_line = ""
+    for line in code.split("\n"):
+        stripped = line.strip()
+        if stripped:
+            first_line = stripped
+            break
+
+    lowered = first_line.lower()
+
+    # Python indicators
+    python_starts = (
+        "import ", "from ", "def ", "class ",
+        "for ", "while ", "if ", "print(",
+        "async ", "with ", "try:", "raise ",
+        "return ", "yield ", "lambda ",
+    )
+    if any(lowered.startswith(p) for p in python_starts):
+        return "python"
+
+    # JavaScript / TypeScript
+    js_starts = (
+        "const ", "let ", "var ", "function ",
+        "console.", "export ", "import {",
+        "require(", "async function",
+    )
+    if any(lowered.startswith(p) for p in js_starts):
+        return "javascript"
+
+    # Bash / shell
+    bash_starts = (
+        "#!/bin/bash", "#!/bin/sh", "echo ",
+        "export ", "cd ", "ls ", "mkdir ",
+        "rm ", "cp ", "mv ",
+    )
+    if any(lowered.startswith(p) for p in bash_starts):
+        return "bash"
+
+    # Ruby
+    ruby_starts = (
+        "puts ", "require ", "def ",
+        "module ", "class ",
+    )
+    if (
+        any(lowered.startswith(p) for p in ruby_starts)
+        and "require " in lowered
+        and "'" in lowered
+    ):
+        return "ruby"
+
+    # Default to Python
+    return "python"
+
+
+def _sandbox_status(
+    state: _SessionState,
+    console: Console,
+) -> None:
+    """Display current sandbox configuration.
+
+    Args:
+        state: Session state with sandbox settings.
+        console: Rich console for output.
+    """
+    from prism.tools.code_sandbox import (
+        DEFAULT_MEMORY_MB,
+        DEFAULT_TIMEOUT,
+    )
+
+    table = Table(
+        show_header=False,
+        box=None,
+        padding=(0, 2),
+    )
+    table.add_column("Key", style="bold")
+    table.add_column("Value")
+
+    enabled_str = (
+        "[green]yes[/]"
+        if state.sandbox_enabled
+        else "[red]no[/]"
+    )
+    table.add_row("Enabled", enabled_str)
+
+    sb_type = state.sandbox_type or "auto"
+    table.add_row("Type", sb_type)
+    table.add_row(
+        "Timeout", f"{DEFAULT_TIMEOUT}s",
+    )
+    table.add_row(
+        "Memory limit", f"{DEFAULT_MEMORY_MB} MB",
+    )
+
+    console.print(
+        Panel(
+            table,
+            title="[bold]Sandbox Status[/bold]",
+            border_style="blue",
+        )
+    )
+
+
 def _cmd_tasks(
     args: str,
     console: Console,
     settings: Settings,
     **_: Any,
 ) -> str:
-    """Background task management — list or cancel tasks."""
+    """Background task management — list, cancel, results, clear.
+
+    Subcommands:
+        ``/tasks`` or ``/tasks list`` -- table of all tasks
+            with ID, description, coloured status, progress %,
+            elapsed time, and ETA.
+        ``/tasks cancel <id>`` -- cancel a running task.
+        ``/tasks results <id>`` -- view completed output in a
+            Rich Panel.
+        ``/tasks clear`` -- remove completed/failed tasks.
+
+    Status group counts are printed above the table so users
+    can see at a glance how many tasks are in each state.
+    """
+    import time as _time
+    from datetime import datetime as _dt
+
     try:
-        from prism.tools.task_queue import TaskQueue
+        from prism.tools.task_queue import TaskQueue, TaskStatus
 
         tasks_dir = settings.prism_home / "tasks"
         queue = TaskQueue(tasks_dir=tasks_dir)
@@ -894,10 +1799,12 @@ def _cmd_tasks(
         sub = parts[0].lower() if parts else "list"
         extra = parts[1].strip() if len(parts) > 1 else ""
 
+        # --- /tasks cancel <id> ---
         if sub == "cancel":
             if not extra:
                 console.print(
-                    "[yellow]Usage:[/] /tasks cancel <task-id>"
+                    "[yellow]Usage:[/] "
+                    "/tasks cancel <task-id>"
                 )
                 return "continue"
             cancelled = queue.cancel(extra)
@@ -907,44 +1814,205 @@ def _cmd_tasks(
                 )
             else:
                 console.print(
-                    f"[yellow]Task {extra} already completed.[/]"
+                    f"[yellow]Task {extra} already "
+                    f"completed.[/]"
                 )
             return "continue"
 
-        # Default: list
-        tasks = queue.list_tasks()
-        if not tasks:
-            console.print("[dim]No background tasks.[/dim]")
+        # --- /tasks results <id> ---
+        if sub == "results":
+            if not extra:
+                console.print(
+                    "[yellow]Usage:[/] "
+                    "/tasks results <task-id>"
+                )
+                return "continue"
+            result = queue.get_results(extra)
+            if result is None:
+                task_obj = queue.get_task(extra)
+                console.print(
+                    f"[yellow]Task {extra} "
+                    f"({task_obj.status.value}) "
+                    f"has no results yet.[/]"
+                )
+                return "continue"
+            style = (
+                "green" if result.exit_code == 0
+                else "red"
+            )
+            header = (
+                f"[{style}]Exit: {result.exit_code}"
+                f"[/{style}] | "
+                f"{result.duration_ms:.0f}ms"
+            )
+            body_parts: list[str] = []
+            if result.output:
+                body_parts.append(result.output)
+            if result.error:
+                body_parts.append(
+                    f"[red]{result.error}[/red]"
+                )
+            body = (
+                "\n".join(body_parts)
+                if body_parts else "(no output)"
+            )
+            console.print(
+                Panel(
+                    body,
+                    title=header,
+                    border_style=style,
+                )
+            )
             return "continue"
 
-        table = Table(title="Background Tasks")
-        table.add_column("ID", style="cyan", width=10)
-        table.add_column("Name")
-        table.add_column("Status", justify="center")
-        table.add_column("Progress", justify="right")
-        table.add_column("Created")
+        # --- /tasks clear ---
+        if sub == "clear":
+            cleared = queue.cleanup_completed(
+                max_age_hours=0,
+            )
+            console.print(
+                f"[green]Cleared {cleared} "
+                f"completed/failed task(s).[/]"
+            )
+            return "continue"
 
-        status_colors = {
+        # --- /tasks list (default) ---
+        tasks = queue.list_tasks()
+        if not tasks:
+            console.print(
+                "[dim]No background tasks.[/dim]"
+            )
+            return "continue"
+
+        # Status group counts
+        status_colors: dict[str, str] = {
             "queued": "dim",
-            "running": "yellow",
+            "running": "cyan",
             "completed": "green",
             "failed": "red",
-            "cancelled": "dim red",
+            "cancelled": "yellow",
         }
 
+        counts: dict[str, int] = {}
         for task in tasks:
-            color = status_colors.get(task.status.value, "white")
-            progress = (
-                f"{task.progress:.0%}"
-                if task.progress < 1.0
-                else "Done"
+            sv = task.status.value
+            counts[sv] = counts.get(sv, 0) + 1
+
+        summary_parts: list[str] = []
+        for sv, count in counts.items():
+            color = status_colors.get(sv, "white")
+            summary_parts.append(
+                f"[{color}]{count} {sv}[/{color}]"
             )
+        console.print(
+            "[bold]Tasks:[/bold] "
+            + ", ".join(summary_parts)
+        )
+
+        # Build the task table
+        table = Table(title="Background Tasks")
+        table.add_column("ID", style="cyan", width=10)
+        table.add_column("Description")
+        table.add_column("Status", justify="center")
+        table.add_column(
+            "Progress", justify="right",
+        )
+        table.add_column(
+            "Elapsed", justify="right",
+        )
+        table.add_column("ETA", justify="right")
+
+        now_ts = _time.time()
+
+        for task in tasks:
+            color = status_colors.get(
+                task.status.value, "white",
+            )
+
+            # Progress display with bar for running
+            if task.status == TaskStatus.RUNNING:
+                pct = f"{task.progress:.0%}"
+                bar_len = 10
+                filled = int(task.progress * bar_len)
+                bar = (
+                    "[cyan]"
+                    + "#" * filled
+                    + "-" * (bar_len - filled)
+                    + "[/cyan]"
+                )
+                progress_str = f"{bar} {pct}"
+            elif task.progress >= 1.0:
+                progress_str = "[green]Done[/green]"
+            else:
+                progress_str = f"{task.progress:.0%}"
+
+            # Elapsed time calculation
+            elapsed_s = 0.0
+            try:
+                start_str = (
+                    task.started_at or task.created_at
+                )
+                start_dt = _dt.fromisoformat(start_str)
+                if task.completed_at:
+                    end_dt = _dt.fromisoformat(
+                        task.completed_at,
+                    )
+                    elapsed_s = (
+                        end_dt - start_dt
+                    ).total_seconds()
+                else:
+                    elapsed_s = (
+                        now_ts
+                        - start_dt.replace(
+                            tzinfo=UTC,
+                        ).timestamp()
+                    )
+                elapsed_s = max(elapsed_s, 0)
+                if elapsed_s >= 3600:
+                    elapsed_str = (
+                        f"{elapsed_s / 3600:.1f}h"
+                    )
+                elif elapsed_s >= 60:
+                    elapsed_str = (
+                        f"{elapsed_s / 60:.1f}m"
+                    )
+                else:
+                    elapsed_str = f"{elapsed_s:.0f}s"
+            except (ValueError, TypeError):
+                elapsed_str = "-"
+
+            # ETA for running tasks with progress
+            eta_str = "-"
+            if (
+                task.status == TaskStatus.RUNNING
+                and 0 < task.progress < 1.0
+                and elapsed_s > 0
+            ):
+                remaining_s = (
+                    elapsed_s / task.progress
+                    * (1.0 - task.progress)
+                )
+                if remaining_s >= 3600:
+                    eta_str = (
+                        f"~{remaining_s / 3600:.1f}h"
+                    )
+                elif remaining_s >= 60:
+                    eta_str = (
+                        f"~{remaining_s / 60:.1f}m"
+                    )
+                else:
+                    eta_str = f"~{remaining_s:.0f}s"
+
             table.add_row(
                 task.id,
-                task.name,
-                f"[{color}]{task.status.value}[/{color}]",
-                progress,
-                task.created_at[:19],
+                task.description,
+                (
+                    f"[{color}]{task.status.value}"
+                    f"[/{color}]"
+                ),
+                progress_str,
+                elapsed_str,
+                eta_str,
             )
         console.print(table)
 
