@@ -194,6 +194,10 @@ class _SessionState:
         self.privacy_manager: Any | None = None
         self.offline_manager: Any | None = None
 
+        # UI tracking — shown in the status bar
+        self.last_model: str = ""
+        self.session_total_cost: float = 0.0
+
 
 # ======================================================================
 # Completer — slash commands + file paths
@@ -453,18 +457,49 @@ def run_repl(
     except Exception as exc:
         logger.debug("module_init_failed", error=str(exc))
 
+    def _build_toolbar() -> Any:
+        """Build the status bar below the input area."""
+        from prompt_toolkit.formatted_text import HTML
+
+        parts: list[str] = []
+
+        # Left side: help hint
+        parts.append("<style bg='#333333' fg='#888888'> ? /help </style>")
+
+        # Right side: model + cost
+        info: list[str] = []
+        if state.last_model:
+            # Show just the model name part (e.g. "mistral-small" not "mistral/mistral-small-latest")
+            name = state.last_model.rsplit("/", 1)[-1]
+            if name.endswith("-latest"):
+                name = name[:-7]
+            info.append(f"<style fg='#888888'>{name}</style>")
+        if state.session_total_cost > 0.0001:
+            info.append(
+                f"<style fg='#bbbb00'>${state.session_total_cost:.4f}</style>"
+            )
+        if info:
+            right = " <style fg='#555555'>\u00b7</style> ".join(info)
+            parts.append(f"  {right}")
+
+        return HTML(" ".join(parts))
+
     while True:
         try:
             try:
                 from prompt_toolkit.formatted_text import HTML
                 from rich.rule import Rule
 
-                # Thin line above the prompt (like Claude CLI)
+                # Line above the prompt (like Claude CLI)
                 console.print(Rule(style="dim"))
 
                 user_input = session.prompt(
-                    HTML("<ansibrightcyan><b>\u276f </b></ansibrightcyan>")
+                    HTML("<ansibrightcyan><b>\u276f </b></ansibrightcyan>"),
+                    bottom_toolbar=_build_toolbar,
                 ).strip()
+
+                # Line below the prompt (closes the input area)
+                console.print(Rule(style="dim"))
             except KeyboardInterrupt:
                 continue
             except EOFError:
@@ -6717,9 +6752,9 @@ def _process_prompt(
                     # trailing spacing for visual consistency.
                     console.print()
 
-            # Show cost (only if non-zero)
-            if total_cost > 0.001:
-                console.print(f"[dim]${total_cost:.4f}[/dim]")
+            # Track model + cost for status bar
+            state.last_model = chosen_model
+            state.session_total_cost += total_cost
 
             # Record outcome for adaptive learning
             if state.learner and tier:
