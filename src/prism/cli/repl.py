@@ -457,49 +457,31 @@ def run_repl(
     except Exception as exc:
         logger.debug("module_init_failed", error=str(exc))
 
-    def _build_toolbar() -> Any:
-        """Build the status bar below the input area."""
-        from prompt_toolkit.formatted_text import HTML
+    def _status_toolbar() -> Any:
+        """Subtle status bar: model + cost in dim text."""
+        from prompt_toolkit.formatted_text import ANSI
 
         parts: list[str] = []
-
-        # Left side: help hint
-        parts.append("<style bg='#333333' fg='#888888'> ? /help </style>")
-
-        # Right side: model + cost
-        info: list[str] = []
         if state.last_model:
-            # Show just the model name part (e.g. "mistral-small" not "mistral/mistral-small-latest")
             name = state.last_model.rsplit("/", 1)[-1]
             if name.endswith("-latest"):
                 name = name[:-7]
-            info.append(f"<style fg='#888888'>{name}</style>")
+            parts.append(name)
         if state.session_total_cost > 0.0001:
-            info.append(
-                f"<style fg='#bbbb00'>${state.session_total_cost:.4f}</style>"
-            )
-        if info:
-            right = " <style fg='#555555'>\u00b7</style> ".join(info)
-            parts.append(f"  {right}")
-
-        return HTML(" ".join(parts))
+            parts.append(f"${state.session_total_cost:.4f}")
+        parts.append("/help for commands")
+        sep = " \u00b7 "
+        return ANSI(f"\033[2m {sep.join(parts)}\033[0m")
 
     while True:
         try:
             try:
                 from prompt_toolkit.formatted_text import HTML
-                from rich.rule import Rule
-
-                # Line above the prompt (like Claude CLI)
-                console.print(Rule(style="dim"))
 
                 user_input = session.prompt(
                     HTML("<ansibrightcyan><b>\u276f </b></ansibrightcyan>"),
-                    bottom_toolbar=_build_toolbar,
+                    bottom_toolbar=_status_toolbar,
                 ).strip()
-
-                # Line below the prompt (closes the input area)
-                console.print(Rule(style="dim"))
             except KeyboardInterrupt:
                 continue
             except EOFError:
