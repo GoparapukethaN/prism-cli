@@ -439,10 +439,16 @@ def run_repl(
     except Exception as exc:
         logger.debug("module_init_failed", error=str(exc))
 
+    _turn_count = 0  # Track turns for separator display
+
     while True:
         try:
             try:
                 from prompt_toolkit.formatted_text import HTML
+                from rich.rule import Rule
+
+                # Separator line between turns (like Claude CLI)
+                console.print(Rule(style="dim"))
 
                 user_input = session.prompt(
                     HTML("<ansibrightcyan><b>&gt; </b></ansibrightcyan>")
@@ -466,6 +472,7 @@ def run_repl(
                     dry_run=dry_run,
                     offline=offline,
                 )
+                _turn_count += 1
                 if result == "quit":
                     break
                 continue
@@ -479,6 +486,7 @@ def run_repl(
                 dry_run=dry_run,
                 offline=offline,
             )
+            _turn_count += 1
 
         except Exception:
             logger.exception("repl_error")

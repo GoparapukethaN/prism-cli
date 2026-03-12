@@ -22,7 +22,8 @@ class StreamHandler:
     """Handles streaming token display with Rich Markdown rendering.
 
     Shows a "Thinking..." spinner until the first token arrives, then
-    progressively renders Markdown in a Rich Live display.
+    progressively renders Markdown in a Rich Live display with
+    per-token refresh for a visible typing effect.
 
     Args:
         console: The Rich console for rendering.
@@ -54,7 +55,8 @@ class StreamHandler:
         """Called for each streaming token delta.
 
         On first token: replaces spinner with Live Markdown display.
-        On subsequent tokens: updates the Markdown render.
+        On subsequent tokens: updates the Markdown render and forces
+        an immediate refresh for a visible typing effect.
         """
         if not token:
             return
@@ -71,7 +73,8 @@ class StreamHandler:
             self._live = Live(
                 Markdown(""),
                 console=self.console,
-                refresh_per_second=12,
+                # High refresh rate, but we also force refresh per token
+                refresh_per_second=30,
                 vertical_overflow="visible",
             )
             self._live.start()
@@ -81,11 +84,13 @@ class StreamHandler:
         self.buffer += token
         self._token_count += 1
 
-        # Update live display with rendered markdown
+        # Update live display and force immediate refresh for typing effect
         if self._live is not None:
             from rich.markdown import Markdown
 
             self._live.update(Markdown(self.buffer))
+            # Force immediate screen update so each token is visible
+            self._live.refresh()
 
     def finalize(self) -> str:
         """Stop the Live display and return the full content."""
