@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
@@ -289,3 +290,41 @@ def display_streaming_token(
     """
     con = _get_console(console)
     con.print(token, end="", highlight=False)
+
+
+# ---------------------------------------------------------------------------
+# Diff preview
+# ---------------------------------------------------------------------------
+
+
+def display_diff(
+    diff_text: str,
+    file_path: str = "",
+    console: Console | None = None,
+) -> None:
+    """Display a colourised diff inside a Rich panel.
+
+    Uses Rich :class:`Syntax` with ``language="diff"`` to provide
+    red/green colouring for removed/added lines.
+
+    Args:
+        diff_text: The unified-diff (or simple ``+``/``-`` prefixed) text.
+        file_path: Optional path shown as the panel title.
+        console: Optional Rich console; creates a themed one if omitted.
+    """
+    con = _get_console(console)
+
+    if not diff_text or not diff_text.strip():
+        con.print("  [dim](no changes)[/dim]")
+        return
+
+    title = f"[bold]Diff: {file_path}[/bold]" if file_path else "[bold]Diff Preview[/bold]"
+
+    syntax = Syntax(
+        diff_text,
+        lexer="diff",
+        theme="ansi_dark",
+        word_wrap=True,
+    )
+
+    con.print(Panel(syntax, title=title, border_style="yellow"))

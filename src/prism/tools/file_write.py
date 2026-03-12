@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -115,3 +116,67 @@ class WriteFileTool(Tool):
                 "path": str(resolved),
             },
         )
+
+    # ------------------------------------------------------------------
+    # Diff preview (read-only)
+    # ------------------------------------------------------------------
+
+    def generate_preview_diff(
+        self, arguments: dict[str, Any],
+    ) -> tuple[str, bool]:
+        """Generate a unified diff without writing anything.
+
+        For new files every line is shown as an addition.  For existing
+        files a standard unified diff with three lines of context is
+        produced.
+
+        Args:
+            arguments: The same dict that would be passed to
+                :meth:`execute` (must contain ``path`` and ``content``).
+
+        Returns:
+            A ``(diff_text, is_new_file)`` tuple.  *diff_text* may be
+            empty when the new content is identical to the existing file.
+
+        Raises:
+            Exception: If path validation fails (propagated from
+                :class:`PathGuard`).
+        """
+        validated = self.validate_arguments(arguments)
+        file_path_str: str = validated["path"]
+        content: str = validated["content"]
+
+        resolved = self._path_guard.validate(file_path_str)
+        is_new = not resolved.exists()
+
+        if is_new:
+            # Show all lines as additions
+            new_lines = content.splitlines(keepends=True)
+            # Ensure the last line ends with a newline for clean diff
+            if new_lines and not new_lines[-1].endswith("\n"):
+                new_lines[-1] += "\n"
+            diff = difflib.unified_diff(
+                [],
+                new_lines,
+                fromfile="/dev/null",
+                tofile=f"b/{file_path_str}",
+            )
+            return "".join(diff), True
+
+        # Existing file — produce a proper unified diff
+        try:
+            original = resolved.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            original = resolved.read_text(encoding="latin-1")
+
+        original_lines = original.splitlines(keepends=True)
+        new_lines = content.splitlines(keepends=True)
+
+        diff = difflib.unified_diff(
+            original_lines,
+            new_lines,
+            fromfile=f"a/{file_path_str}",
+            tofile=f"b/{file_path_str}",
+            n=3,
+        )
+        return "".join(diff), False

@@ -180,3 +180,65 @@ class EditFileTool(Tool):
                 "path": str(resolved),
             },
         )
+
+    # ------------------------------------------------------------------
+    # Diff preview (read-only)
+    # ------------------------------------------------------------------
+
+    def generate_preview_diff(
+        self, arguments: dict[str, Any],
+    ) -> str | None:
+        """Generate a unified diff without writing anything.
+
+        Reads the file, locates the search string, and produces a diff
+        showing what the replacement would look like.
+
+        Args:
+            arguments: The same dict that would be passed to
+                :meth:`execute` (must contain ``path``, ``search``,
+                and ``replace``; optionally ``replace_all``).
+
+        Returns:
+            The unified diff text, or ``None`` if the search string is
+            not found in the file.
+
+        Raises:
+            Exception: If path validation or file reading fails.
+        """
+        validated = self.validate_arguments(arguments)
+        file_path_str: str = validated["path"]
+        search: str = validated["search"]
+        replace: str = validated["replace"]
+        replace_all: bool = validated.get("replace_all", False)
+
+        resolved = self._path_guard.validate(file_path_str)
+
+        if not resolved.exists() or not resolved.is_file():
+            return None
+
+        try:
+            original = resolved.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            original = resolved.read_text(encoding="latin-1")
+
+        count = original.count(search)
+        if count == 0:
+            return None
+
+        # Perform the same replacement logic as execute()
+        if replace_all:
+            new_content = original.replace(search, replace)
+        else:
+            new_content = original.replace(search, replace, 1)
+
+        original_lines = original.splitlines(keepends=True)
+        new_lines = new_content.splitlines(keepends=True)
+
+        diff = difflib.unified_diff(
+            original_lines,
+            new_lines,
+            fromfile=f"a/{file_path_str}",
+            tofile=f"b/{file_path_str}",
+            n=3,
+        )
+        return "".join(diff) or None

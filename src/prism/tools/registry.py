@@ -97,6 +97,8 @@ class ToolRegistry:
         excluded_patterns: list[str] | None = None,
         *,
         web_enabled: bool = False,
+        cost_tracker: object | None = None,
+        adaptive_learner: object | None = None,
     ) -> ToolRegistry:
         """Build a registry pre-loaded with all built-in tools.
 
@@ -105,33 +107,66 @@ class ToolRegistry:
             sandbox:           A :class:`CommandSandbox` for the terminal tool.
             excluded_patterns: Optional extra exclusion patterns for directory
                                and search tools.
-            web_enabled:       If ``True``, register the ``browse_web`` and
-                               ``screenshot`` tools.
+            web_enabled:       If ``True``, register the ``browse_web``,
+                               ``screenshot``, ``search_web``, and
+                               ``fetch_docs`` tools.
+            cost_tracker:      Optional :class:`CostTracker` for the cost
+                               optimizer tool.
+            adaptive_learner:  Optional :class:`AdaptiveLearner` for the cost
+                               optimizer tool.
 
         Returns:
             A fully populated :class:`ToolRegistry`.
         """
+        from prism.tools.auto_test import AutoTestTool
         from prism.tools.directory import ListDirectoryTool
         from prism.tools.file_edit import EditFileTool
         from prism.tools.file_read import ReadFileTool
         from prism.tools.file_write import WriteFileTool
+        from prism.tools.git_tool import GitTool
+        from prism.tools.quality_gate import QualityGateTool
         from prism.tools.search import SearchCodebaseTool
         from prism.tools.terminal import ExecuteCommandTool
+        from prism.tools.vision import VisionTool
 
         registry = cls()
 
+        # File-system tools
         registry.register(ReadFileTool(path_guard))
         registry.register(WriteFileTool(path_guard))
         registry.register(EditFileTool(path_guard))
         registry.register(ListDirectoryTool(path_guard, excluded_patterns=excluded_patterns))
         registry.register(SearchCodebaseTool(path_guard))
-        registry.register(ExecuteCommandTool(sandbox))
 
+        # Terminal and git
+        registry.register(ExecuteCommandTool(sandbox))
+        registry.register(GitTool(sandbox))
+
+        # Smart tools (auto-test, quality gate)
+        registry.register(AutoTestTool(sandbox))
+        registry.register(QualityGateTool(sandbox))
+
+        # Cost optimizer (requires cost tracker + adaptive learner)
+        if cost_tracker is not None and adaptive_learner is not None:
+            from prism.tools.cost_optimizer import CostOptimizerTool
+
+            registry.register(CostOptimizerTool(cost_tracker, adaptive_learner))
+
+        # Vision tool (always available)
+        registry.register(VisionTool())
+
+        # Web tools (optional)
         if web_enabled:
             from prism.tools.browser import BrowseWebTool
+            from prism.tools.browser_interact import BrowserInteractTool
+            from prism.tools.fetch_docs import FetchDocsTool
             from prism.tools.screenshot import ScreenshotTool
+            from prism.tools.search_web import SearchWebTool
 
             registry.register(BrowseWebTool())
+            registry.register(BrowserInteractTool())
             registry.register(ScreenshotTool())
+            registry.register(SearchWebTool())
+            registry.register(FetchDocsTool())
 
         return registry

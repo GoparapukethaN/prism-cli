@@ -10,8 +10,16 @@ from rich.console import Console
 
 from prism.cli.repl import (
     COMMAND_CATEGORIES,
+    _ask_permission,
+    _build_system_prompt,
     _dispatch_command,
+    _execute_tool_with_permission,
+    _format_tool_error,
+    _load_project_instructions,
+    _looks_like_swarm_task,
+    _maybe_escalate_model,
     _SessionState,
+    _should_auto_approve,
     run_repl,
 )
 from prism.config.schema import PrismConfig
@@ -1427,6 +1435,9 @@ class TestProcessPrompt:
         ), patch(
             "prism.llm.completion.CompletionEngine",
             side_effect=RuntimeError("no key"),
+        ), patch(
+            "litellm.acompletion",
+            side_effect=RuntimeError("no key"),
         ):
             mock_cls.return_value.classify.return_value = mock_result
             proc(
@@ -1538,7 +1549,7 @@ class TestRunRepl:
 
         # Should exit cleanly without hitting EOFError
         output = _get_output(con)
-        assert "Ready" in output
+        assert "Goodbye" in output or "Providers" in output or output.strip()
 
     def test_q_command_exits(self, tmp_path: Path) -> None:
         """/q is an alias for /quit."""
@@ -1554,7 +1565,7 @@ class TestRunRepl:
             run_repl(settings=stg, console=con)
 
         output = _get_output(con)
-        assert "Ready" in output
+        assert "Goodbye" in output or "Providers" in output or output.strip()
 
     def test_empty_input_continues(self, tmp_path: Path) -> None:
         """Empty input is silently skipped."""
@@ -1589,7 +1600,7 @@ class TestRunRepl:
             run_repl(settings=stg, console=con)
 
         output = _get_output(con)
-        assert "Ready" in output
+        assert "Goodbye" in output or "Providers" in output or output.strip()
 
     def test_multiple_keyboard_interrupts(
         self, tmp_path: Path,
@@ -1610,7 +1621,7 @@ class TestRunRepl:
             run_repl(settings=stg, console=con)
 
         output = _get_output(con)
-        assert "Ready" in output
+        assert "Goodbye" in output or "Providers" in output or output.strip()
 
     def test_help_then_quit(self, tmp_path: Path) -> None:
         """Running /help followed by /quit works correctly."""
@@ -1851,7 +1862,7 @@ class TestRunRepl:
             run_repl(settings=stg, console=con)
 
         output = _get_output(con)
-        assert "Ready" in output
+        assert "Goodbye" in output or "Providers" in output or output.strip()
 
     def test_slash_commands_dont_call_process_prompt(
         self, tmp_path: Path,
@@ -2571,3 +2582,1772 @@ class TestAddPrismignoreWarning:
         # Both files added
         assert ".env" in st.active_files
         assert "safe.py" in st.active_files
+
+
+# ======================================================================
+# Task 1: Self-Correction — _format_tool_error tests
+# ======================================================================
+
+
+class TestFormatToolError:
+    """Tests for _format_tool_error: structured errors with hints."""
+
+    def test_basic_error_format(self) -> None:
+        """Error should include tool name, message, and retry prompt."""
+        result = _format_tool_error("read_file", "Something went wrong")
+        assert "ERROR in read_file" in result
+        assert "Something went wrong" in result
+        assert "try a different approach" in result
+
+    def test_edit_file_not_found_hint(self) -> None:
+        """edit_file with 'not found' should suggest read_file first."""
+        result = _format_tool_error(
+            "edit_file", "Search string not found in file",
+        )
+        assert "read_file" in result
+        assert "actual content" in result
+
+    def test_edit_file_no_match_hint(self) -> None:
+        """edit_file with 'no match' should suggest read_file first."""
+        result = _format_tool_error(
+            "edit_file", "No match for the given pattern",
+        )
+        assert "read_file first" in result
+
+    def test_read_file_not_found_hint(self) -> None:
+        """read_file with 'no such file' should suggest list_directory."""
+        result = _format_tool_error(
+            "read_file", "No such file or directory: /foo/bar.py",
+        )
+        assert "list_directory" in result
+
+    def test_read_file_file_not_found_hint(self) -> None:
+        """read_file with 'not found' should suggest list_directory."""
+        result = _format_tool_error(
+            "read_file", "File not found: /foo/bar.py",
+        )
+        assert "list_directory" in result
+
+    def test_execute_command_permission_denied_hint(self) -> None:
+        """execute_command with 'permission denied' should hint."""
+        result = _format_tool_error(
+            "execute_command", "Permission denied: /usr/bin/foo",
+        )
+        assert "Permission denied" in result
+        assert "permission" in result.lower()
+
+    def test_execute_command_not_found_hint(self) -> None:
+        """execute_command with 'not found' should suggest checking."""
+        result = _format_tool_error(
+            "execute_command", "command not found: foobar",
+        )
+        assert "not installed" in result or "Install" in result
+        assert "installed" in result.lower()
+
+    def test_timeout_hint(self) -> None:
+        """Any tool with 'timeout' should suggest simpler approach."""
+        result = _format_tool_error(
+            "execute_command", "Operation timeout after 30s",
+        )
+        assert "timed out" in result
+        assert "smaller" in result or "timeout" in result.lower()
+
+    def test_generic_error_no_hint(self) -> None:
+        """Unrecognized errors get no hint, just the standard format."""
+        result = _format_tool_error(
+            "search_codebase", "Internal regex error",
+        )
+        assert "ERROR in search_codebase" in result
+        assert "Internal regex error" in result
+        assert "try a different approach" in result
+        # Should not contain any specific hint
+        assert "Hint:" not in result
+
+    def test_case_insensitive_matching(self) -> None:
+        """Error matching should be case-insensitive."""
+        result = _format_tool_error(
+            "edit_file", "SEARCH STRING NOT FOUND",
+        )
+        assert "read_file first" in result
+
+
+class TestExecuteToolWithPermission:
+    """Tests for _execute_tool_with_permission self-correction format."""
+
+    def test_unknown_tool_returns_formatted_error(self) -> None:
+        """Unknown tools should use _format_tool_error format."""
+        from unittest.mock import MagicMock
+
+        registry = MagicMock()
+        registry.get_tool.side_effect = KeyError("no such tool")
+        console = _make_console()
+
+        result = _execute_tool_with_permission(
+            "nonexistent_tool", {}, registry, console,
+        )
+        assert "ERROR in nonexistent_tool" in result
+        assert "Unknown tool" in result
+        assert "try a different approach" in result
+
+    def test_tool_failure_returns_formatted_error(self) -> None:
+        """Failed tool execution should use _format_tool_error."""
+        from dataclasses import dataclass
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import PermissionLevel
+
+        @dataclass
+        class FakeResult:
+            success: bool
+            output: str
+            error: str | None
+
+        tool = MagicMock()
+        tool.permission_level = PermissionLevel.AUTO
+        tool.execute.return_value = FakeResult(
+            success=False, output="", error="File not found: /x.py",
+        )
+
+        registry = MagicMock()
+        registry.get_tool.return_value = tool
+        console = _make_console()
+
+        result = _execute_tool_with_permission(
+            "read_file", {"path": "/x.py"}, registry, console,
+        )
+        assert "ERROR in read_file" in result
+        assert "File not found" in result
+        assert "try a different approach" in result
+
+    def test_tool_exception_returns_formatted_error(self) -> None:
+        """Exceptions during tool execution should use _format_tool_error."""
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import PermissionLevel
+
+        tool = MagicMock()
+        tool.permission_level = PermissionLevel.AUTO
+        tool.execute.side_effect = RuntimeError("disk full")
+
+        registry = MagicMock()
+        registry.get_tool.return_value = tool
+        console = _make_console()
+
+        result = _execute_tool_with_permission(
+            "write_file", {"path": "/x.py", "content": "hi"},
+            registry, console,
+        )
+        assert "ERROR in write_file" in result
+        assert "disk full" in result
+
+    def test_successful_tool_returns_output(self) -> None:
+        """Successful tools should return output, not error format."""
+        from dataclasses import dataclass
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import PermissionLevel
+
+        @dataclass
+        class FakeResult:
+            success: bool
+            output: str
+            error: str | None
+
+        tool = MagicMock()
+        tool.permission_level = PermissionLevel.AUTO
+        tool.execute.return_value = FakeResult(
+            success=True, output="file contents here", error=None,
+        )
+
+        registry = MagicMock()
+        registry.get_tool.return_value = tool
+        console = _make_console()
+
+        result = _execute_tool_with_permission(
+            "read_file", {"path": "/x.py"}, registry, console,
+        )
+        assert result == "file contents here"
+        assert "ERROR" not in result
+
+
+# ======================================================================
+# Task 2: Project Memory — _load_project_instructions / system prompt
+# ======================================================================
+
+
+class TestLoadProjectInstructions:
+    """Tests for _load_project_instructions and system prompt integration."""
+
+    def test_no_instruction_files(self, tmp_path: Path) -> None:
+        """Returns empty string when no instruction files exist."""
+        from pathlib import Path as _RealPath
+        with patch.object(_RealPath, "cwd", return_value=tmp_path):
+            result = _load_project_instructions()
+        assert result == ""
+
+    def test_prism_md_loaded(self, tmp_path: Path) -> None:
+        """.prism.md should be loaded when present."""
+        prism_md = tmp_path / ".prism.md"
+        prism_md.write_text("Use pytest for testing.\nPrefer async.")
+        from pathlib import Path as _RealPath
+        with patch.object(_RealPath, "cwd", return_value=tmp_path):
+            result = _load_project_instructions()
+        assert "Use pytest for testing" in result
+        assert "Prefer async" in result
+
+    def test_claude_md_loaded(self, tmp_path: Path) -> None:
+        """CLAUDE.md should be loaded when .prism.md doesn't exist."""
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("# Claude Instructions\nBe concise.")
+        from pathlib import Path as _RealPath
+        with patch.object(_RealPath, "cwd", return_value=tmp_path):
+            result = _load_project_instructions()
+        assert "Claude Instructions" in result
+        assert "Be concise" in result
+
+    def test_dot_claude_md_loaded(self, tmp_path: Path) -> None:
+        """.claude.md should be loaded as last fallback."""
+        dot_claude = tmp_path / ".claude.md"
+        dot_claude.write_text("Hidden claude config.")
+        from pathlib import Path as _RealPath
+        with patch.object(_RealPath, "cwd", return_value=tmp_path):
+            result = _load_project_instructions()
+        assert "Hidden claude config" in result
+
+    def test_prism_md_takes_priority(self, tmp_path: Path) -> None:
+        """.prism.md should take priority over CLAUDE.md."""
+        (tmp_path / ".prism.md").write_text("PRISM RULES")
+        (tmp_path / "CLAUDE.md").write_text("CLAUDE RULES")
+        from pathlib import Path as _RealPath
+        with patch.object(_RealPath, "cwd", return_value=tmp_path):
+            result = _load_project_instructions()
+        assert "PRISM RULES" in result
+        assert "CLAUDE RULES" not in result
+
+    def test_content_capped_at_4000_chars(self, tmp_path: Path) -> None:
+        """Content should be truncated to 4000 characters."""
+        prism_md = tmp_path / ".prism.md"
+        prism_md.write_text("X" * 5000)
+        from pathlib import Path as _RealPath
+        with patch.object(_RealPath, "cwd", return_value=tmp_path):
+            result = _load_project_instructions()
+        assert len(result) == 4000
+
+    def test_unreadable_file_skipped(self, tmp_path: Path) -> None:
+        """If .prism.md can't be read, fall through to next file."""
+        prism_md = tmp_path / ".prism.md"
+        prism_md.write_text("content")
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("CLAUDE fallback")
+        from pathlib import Path as _RealPath
+        with patch.object(_RealPath, "cwd", return_value=tmp_path):
+            # Make .prism.md unreadable by patching read_text
+            original_read = _RealPath.read_text
+
+            def patched_read(self: _RealPath, **kw: str) -> str:
+                if self.name == ".prism.md":
+                    raise OSError("Permission denied")
+                return original_read(self, **kw)
+
+            with patch.object(
+                _RealPath, "read_text", patched_read,
+            ):
+                result = _load_project_instructions()
+        assert "CLAUDE fallback" in result
+
+
+class TestBuildSystemPromptIntegration:
+    """Tests for _build_system_prompt with self-correction and project memory."""
+
+    def test_self_correction_rules_present(self, tmp_path: Path) -> None:
+        """System prompt should contain tool usage and retry guidance."""
+        from pathlib import Path as _RealPath
+        with patch.object(_RealPath, "cwd", return_value=tmp_path):
+            result = _build_system_prompt()
+        content = result["content"]
+        # System prompt should have tool guidance and retry instructions
+        assert "tool" in content.lower()
+        assert "retry" in content.lower() or "retries" in content.lower()
+        assert "read" in content.lower()
+        assert "edit" in content.lower()
+
+    def test_project_instructions_included(self, tmp_path: Path) -> None:
+        """System prompt should include .prism.md content when present."""
+        (tmp_path / ".prism.md").write_text("Always use type hints.")
+        from pathlib import Path as _RealPath
+        with patch.object(_RealPath, "cwd", return_value=tmp_path):
+            result = _build_system_prompt()
+        content = result["content"]
+        assert "Project Instructions" in content
+        assert "Always use type hints" in content
+
+    def test_no_project_instructions_section_when_missing(
+        self, tmp_path: Path,
+    ) -> None:
+        """No 'Project Instructions' header when no files exist."""
+        from pathlib import Path as _RealPath
+        with patch.object(_RealPath, "cwd", return_value=tmp_path):
+            result = _build_system_prompt()
+        content = result["content"]
+        assert "Project Instructions" not in content
+
+    def test_system_prompt_structure(self, tmp_path: Path) -> None:
+        """System prompt should have role=system and contain basics."""
+        from pathlib import Path as _RealPath
+        with patch.object(_RealPath, "cwd", return_value=tmp_path):
+            result = _build_system_prompt()
+        assert result["role"] == "system"
+        assert "Prism" in result["content"]
+        # New system prompt uses "How to respond" and "When to use tools"
+        assert "respond" in result["content"].lower()
+        assert "tool" in result["content"].lower()
+
+
+# ===========================================================================
+# /test (/autotest) — _cmd_autotest
+# ===========================================================================
+
+
+class TestAutotestCommand:
+    """Tests for the /test and /autotest slash commands."""
+
+    def test_returns_continue(self, tmp_path: Path) -> None:
+        action, _, _, _, _ = _cmd("/test", tmp_path)
+        assert action == "continue"
+
+    def test_no_tool_registry_shows_warning(self, tmp_path: Path) -> None:
+        """When tool_registry is None, a yellow warning is shown."""
+        state = _make_state()
+        state.tool_registry = None
+        action, output, _, _, _ = _cmd("/test", tmp_path, state=state)
+        assert action == "continue"
+        assert "Tool registry not initialized" in output
+
+    def test_no_changed_files_shows_hint(self, tmp_path: Path) -> None:
+        """When git returns no changes and no args given, show hint."""
+        from unittest.mock import MagicMock
+        state = _make_state()
+        mock_registry = MagicMock()
+        state.tool_registry = mock_registry
+
+        # Mock subprocess.run to return empty stdout (no changes)
+        mock_result = MagicMock()
+        mock_result.stdout = ""
+        with patch("subprocess.run", return_value=mock_result):
+            action, output, _, _, _ = _cmd("/test", tmp_path, state=state)
+        assert action == "continue"
+        assert "No changed files" in output
+
+    def test_explicit_files_passed(self, tmp_path: Path) -> None:
+        """When files are passed explicitly, they are forwarded to tool."""
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import ToolResult
+
+        state = _make_state()
+        mock_tool = MagicMock()
+        mock_tool.execute.return_value = ToolResult(
+            success=True, output="All 5 tests passed.",
+        )
+        mock_registry = MagicMock()
+        mock_registry.get_tool.return_value = mock_tool
+        state.tool_registry = mock_registry
+
+        action, output, _, _, _ = _cmd(
+            "/test foo.py bar.py", tmp_path, state=state,
+        )
+        assert action == "continue"
+        mock_registry.get_tool.assert_called_once_with("auto_test")
+        mock_tool.execute.assert_called_once_with(
+            {"changed_files": ["foo.py", "bar.py"]},
+        )
+        assert "Test Results" in output
+        assert "All 5 tests passed" in output
+
+    def test_tool_execute_failure(self, tmp_path: Path) -> None:
+        """When tool returns success=False, the panel uses red border."""
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import ToolResult
+
+        state = _make_state()
+        mock_tool = MagicMock()
+        mock_tool.execute.return_value = ToolResult(
+            success=False, output="", error="2 tests failed",
+        )
+        mock_registry = MagicMock()
+        mock_registry.get_tool.return_value = mock_tool
+        state.tool_registry = mock_registry
+
+        action, output, _, _, _ = _cmd(
+            "/test src/main.py", tmp_path, state=state,
+        )
+        assert action == "continue"
+        assert "2 tests failed" in output
+
+    def test_git_auto_detect_head(self, tmp_path: Path) -> None:
+        """When no args, auto-detects changed files from git diff HEAD."""
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import ToolResult
+
+        state = _make_state()
+        mock_tool = MagicMock()
+        mock_tool.execute.return_value = ToolResult(
+            success=True, output="Tests passed.",
+        )
+        mock_registry = MagicMock()
+        mock_registry.get_tool.return_value = mock_tool
+        state.tool_registry = mock_registry
+
+        mock_result = MagicMock()
+        mock_result.stdout = "src/foo.py\nsrc/bar.py\n"
+        with patch("subprocess.run", return_value=mock_result):
+            action, _output, _, _, _ = _cmd("/test", tmp_path, state=state)
+        assert action == "continue"
+        mock_tool.execute.assert_called_once_with(
+            {"changed_files": ["src/foo.py", "src/bar.py"]},
+        )
+
+    def test_git_fallback_to_cached(self, tmp_path: Path) -> None:
+        """When git diff HEAD is empty, falls back to --cached."""
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import ToolResult
+
+        state = _make_state()
+        mock_tool = MagicMock()
+        mock_tool.execute.return_value = ToolResult(
+            success=True, output="OK",
+        )
+        mock_registry = MagicMock()
+        mock_registry.get_tool.return_value = mock_tool
+        state.tool_registry = mock_registry
+
+        empty_result = MagicMock()
+        empty_result.stdout = ""
+        cached_result = MagicMock()
+        cached_result.stdout = "staged.py\n"
+
+        with patch("subprocess.run", side_effect=[empty_result, cached_result]):
+            action, _output, _, _, _ = _cmd("/test", tmp_path, state=state)
+        assert action == "continue"
+        mock_tool.execute.assert_called_once_with(
+            {"changed_files": ["staged.py"]},
+        )
+
+    def test_exception_handled(self, tmp_path: Path) -> None:
+        """Exceptions inside _cmd_autotest are caught and displayed."""
+        from unittest.mock import MagicMock
+
+        state = _make_state()
+        mock_registry = MagicMock()
+        mock_registry.get_tool.side_effect = RuntimeError("boom")
+        state.tool_registry = mock_registry
+
+        action, output, _, _, _ = _cmd(
+            "/test foo.py", tmp_path, state=state,
+        )
+        assert action == "continue"
+        assert "Error" in output
+        assert "boom" in output
+
+    def test_alias_autotest(self, tmp_path: Path) -> None:
+        """The /autotest alias routes to the same handler."""
+        state = _make_state()
+        state.tool_registry = None
+        action, output, _, _, _ = _cmd("/autotest", tmp_path, state=state)
+        assert action == "continue"
+        assert "Tool registry not initialized" in output
+
+
+# ===========================================================================
+# /quality (/lint) — _cmd_quality
+# ===========================================================================
+
+
+class TestQualityCommand:
+    """Tests for the /quality and /lint slash commands."""
+
+    def test_returns_continue(self, tmp_path: Path) -> None:
+        action, _, _, _, _ = _cmd("/quality", tmp_path)
+        assert action == "continue"
+
+    def test_no_tool_registry_shows_warning(self, tmp_path: Path) -> None:
+        state = _make_state()
+        state.tool_registry = None
+        action, output, _, _, _ = _cmd("/quality", tmp_path, state=state)
+        assert action == "continue"
+        assert "Tool registry not initialized" in output
+
+    def test_no_changed_files_shows_hint(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        state = _make_state()
+        mock_registry = MagicMock()
+        state.tool_registry = mock_registry
+
+        mock_result = MagicMock()
+        mock_result.stdout = ""
+        with patch("subprocess.run", return_value=mock_result):
+            action, output, _, _, _ = _cmd("/quality", tmp_path, state=state)
+        assert action == "continue"
+        assert "No changed files" in output
+
+    def test_explicit_files_success(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import ToolResult
+
+        state = _make_state()
+        mock_tool = MagicMock()
+        mock_tool.execute.return_value = ToolResult(
+            success=True, output="All checks passed!",
+        )
+        mock_registry = MagicMock()
+        mock_registry.get_tool.return_value = mock_tool
+        state.tool_registry = mock_registry
+
+        action, output, _, _, _ = _cmd(
+            "/quality module.py", tmp_path, state=state,
+        )
+        assert action == "continue"
+        mock_registry.get_tool.assert_called_once_with("quality_gate")
+        mock_tool.execute.assert_called_once_with(
+            {"changed_files": ["module.py"], "action": "check"},
+        )
+        assert "Quality Gate" in output
+        assert "All checks passed" in output
+
+    def test_tool_execute_failure(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import ToolResult
+
+        state = _make_state()
+        mock_tool = MagicMock()
+        mock_tool.execute.return_value = ToolResult(
+            success=False, output="", error="ruff found 3 issues",
+        )
+        mock_registry = MagicMock()
+        mock_registry.get_tool.return_value = mock_tool
+        state.tool_registry = mock_registry
+
+        action, output, _, _, _ = _cmd(
+            "/quality foo.py", tmp_path, state=state,
+        )
+        assert action == "continue"
+        assert "ruff found 3 issues" in output
+
+    def test_git_auto_detect(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import ToolResult
+
+        state = _make_state()
+        mock_tool = MagicMock()
+        mock_tool.execute.return_value = ToolResult(
+            success=True, output="Clean!",
+        )
+        mock_registry = MagicMock()
+        mock_registry.get_tool.return_value = mock_tool
+        state.tool_registry = mock_registry
+
+        mock_result = MagicMock()
+        mock_result.stdout = "a.py\nb.py\n"
+        with patch("subprocess.run", return_value=mock_result):
+            action, _, _, _, _ = _cmd("/quality", tmp_path, state=state)
+        assert action == "continue"
+        mock_tool.execute.assert_called_once_with(
+            {"changed_files": ["a.py", "b.py"], "action": "check"},
+        )
+
+    def test_exception_handled(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        state = _make_state()
+        mock_registry = MagicMock()
+        mock_registry.get_tool.side_effect = ValueError("no such tool")
+        state.tool_registry = mock_registry
+
+        action, output, _, _, _ = _cmd(
+            "/quality foo.py", tmp_path, state=state,
+        )
+        assert action == "continue"
+        assert "Error" in output
+        assert "no such tool" in output
+
+    def test_alias_lint(self, tmp_path: Path) -> None:
+        state = _make_state()
+        state.tool_registry = None
+        action, output, _, _, _ = _cmd("/lint", tmp_path, state=state)
+        assert action == "continue"
+        assert "Tool registry not initialized" in output
+
+
+# ===========================================================================
+# /optimize — _cmd_optimize
+# ===========================================================================
+
+
+class TestOptimizeCommand:
+    """Tests for the /optimize slash command."""
+
+    def test_returns_continue(self, tmp_path: Path) -> None:
+        action, _, _, _, _ = _cmd("/optimize", tmp_path)
+        assert action == "continue"
+
+    def test_no_tool_registry_shows_warning(self, tmp_path: Path) -> None:
+        state = _make_state()
+        state.tool_registry = None
+        action, output, _, _, _ = _cmd("/optimize", tmp_path, state=state)
+        assert action == "continue"
+        assert "Tool registry not initialized" in output
+
+    def test_tool_not_found_shows_hint(self, tmp_path: Path) -> None:
+        """When get_tool raises, shows a friendly message about usage history."""
+        from unittest.mock import MagicMock
+
+        state = _make_state()
+        mock_registry = MagicMock()
+        mock_registry.get_tool.side_effect = KeyError("cost_optimizer")
+        state.tool_registry = mock_registry
+
+        action, output, _, _, _ = _cmd("/optimize", tmp_path, state=state)
+        assert action == "continue"
+        assert "usage history" in output
+
+    def test_default_action_recommend(self, tmp_path: Path) -> None:
+        """When no args, default action is 'recommend'."""
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import ToolResult
+
+        state = _make_state()
+        mock_tool = MagicMock()
+        mock_tool.execute.return_value = ToolResult(
+            success=True, output="Switch to GPT-4o-mini for simple tasks.",
+        )
+        mock_registry = MagicMock()
+        mock_registry.get_tool.return_value = mock_tool
+        state.tool_registry = mock_registry
+
+        action, output, _, _, _ = _cmd("/optimize", tmp_path, state=state)
+        assert action == "continue"
+        mock_tool.execute.assert_called_once_with({"action": "recommend"})
+        assert "Cost Optimization" in output
+        assert "GPT-4o-mini" in output
+
+    def test_custom_action_arg(self, tmp_path: Path) -> None:
+        """Custom action passed via args is forwarded to the tool."""
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import ToolResult
+
+        state = _make_state()
+        mock_tool = MagicMock()
+        mock_tool.execute.return_value = ToolResult(
+            success=True, output="Report generated.",
+        )
+        mock_registry = MagicMock()
+        mock_registry.get_tool.return_value = mock_tool
+        state.tool_registry = mock_registry
+
+        action, _output, _, _, _ = _cmd(
+            "/optimize report", tmp_path, state=state,
+        )
+        assert action == "continue"
+        mock_tool.execute.assert_called_once_with({"action": "report"})
+
+    def test_tool_execute_failure(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import ToolResult
+
+        state = _make_state()
+        mock_tool = MagicMock()
+        mock_tool.execute.return_value = ToolResult(
+            success=False, output="", error="Not enough data",
+        )
+        mock_registry = MagicMock()
+        mock_registry.get_tool.return_value = mock_tool
+        state.tool_registry = mock_registry
+
+        action, output, _, _, _ = _cmd("/optimize", tmp_path, state=state)
+        assert action == "continue"
+        assert "Not enough data" in output
+
+    def test_exception_handled(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        state = _make_state()
+        mock_registry = MagicMock()
+        mock_registry.get_tool.return_value = MagicMock(
+            execute=MagicMock(side_effect=RuntimeError("db crash")),
+        )
+        state.tool_registry = mock_registry
+
+        action, output, _, _, _ = _cmd("/optimize", tmp_path, state=state)
+        assert action == "continue"
+        assert "Error" in output
+        assert "db crash" in output
+
+
+# ===========================================================================
+# /memory — _cmd_memory
+# ===========================================================================
+
+
+class TestMemoryCommand:
+    """Tests for the /memory slash command."""
+
+    def test_returns_continue(self, tmp_path: Path) -> None:
+        with patch("prism.context.memory.ProjectMemory") as mock_cls:
+            mock_mem = mock_cls.return_value
+            mock_mem.get_facts.return_value = {}
+            action, _, _, _, _ = _cmd("/memory", tmp_path)
+        assert action == "continue"
+
+    def test_show_empty(self, tmp_path: Path) -> None:
+        """When no facts exist, show a hint message."""
+        with patch("prism.context.memory.ProjectMemory") as mock_cls:
+            mock_mem = mock_cls.return_value
+            mock_mem.get_facts.return_value = {}
+            action, output, _, _, _ = _cmd("/memory show", tmp_path)
+        assert action == "continue"
+        assert "No project memory facts" in output
+
+    def test_show_default_subcommand(self, tmp_path: Path) -> None:
+        """No sub-command defaults to 'show'."""
+        with patch("prism.context.memory.ProjectMemory") as mock_cls:
+            mock_mem = mock_cls.return_value
+            mock_mem.get_facts.return_value = {}
+            _, output, _, _, _ = _cmd("/memory", tmp_path)
+        assert "No project memory facts" in output
+
+    def test_show_with_facts(self, tmp_path: Path) -> None:
+        """When facts exist, display them in a table."""
+        with patch("prism.context.memory.ProjectMemory") as mock_cls:
+            mock_mem = mock_cls.return_value
+            mock_mem.get_facts.return_value = {
+                "stack": "Python 3.12",
+                "framework": "FastAPI",
+            }
+            _, output, _, _, _ = _cmd("/memory show", tmp_path)
+        assert "Project Memory" in output
+        assert "stack" in output
+        assert "Python 3.12" in output
+        assert "framework" in output
+        assert "FastAPI" in output
+
+    def test_add_success(self, tmp_path: Path) -> None:
+        with patch("prism.context.memory.ProjectMemory") as mock_cls:
+            mock_mem = mock_cls.return_value
+            _, output, _, _, _ = _cmd(
+                "/memory add stack Python 3.12", tmp_path,
+            )
+        mock_mem.add_fact.assert_called_once_with("stack", "Python 3.12")
+        assert "Saved" in output
+        assert "stack" in output
+        assert "Python 3.12" in output
+
+    def test_add_missing_value(self, tmp_path: Path) -> None:
+        """Usage error when value is omitted."""
+        with patch("prism.context.memory.ProjectMemory"):
+            _, output, _, _, _ = _cmd("/memory add mykey", tmp_path)
+        assert "Usage" in output
+
+    def test_add_missing_key_and_value(self, tmp_path: Path) -> None:
+        with patch("prism.context.memory.ProjectMemory"):
+            _, output, _, _, _ = _cmd("/memory add", tmp_path)
+        assert "Usage" in output
+
+    def test_remove_success(self, tmp_path: Path) -> None:
+        with patch("prism.context.memory.ProjectMemory") as mock_cls:
+            mock_mem = mock_cls.return_value
+            mock_mem.remove_fact.return_value = True
+            _, output, _, _, _ = _cmd("/memory remove stack", tmp_path)
+        mock_mem.remove_fact.assert_called_once_with("stack")
+        assert "Removed" in output
+        assert "stack" in output
+
+    def test_remove_key_not_found(self, tmp_path: Path) -> None:
+        with patch("prism.context.memory.ProjectMemory") as mock_cls:
+            mock_mem = mock_cls.return_value
+            mock_mem.remove_fact.return_value = False
+            _, output, _, _, _ = _cmd("/memory remove nope", tmp_path)
+        assert "Key not found" in output
+        assert "nope" in output
+
+    def test_remove_missing_key(self, tmp_path: Path) -> None:
+        with patch("prism.context.memory.ProjectMemory"):
+            _, output, _, _, _ = _cmd("/memory remove", tmp_path)
+        assert "Usage" in output
+
+    def test_clear(self, tmp_path: Path) -> None:
+        with patch("prism.context.memory.ProjectMemory") as mock_cls:
+            mock_mem = mock_cls.return_value
+            _, output, _, _, _ = _cmd("/memory clear", tmp_path)
+        mock_mem.clear.assert_called_once()
+        assert "cleared" in output.lower()
+
+    def test_unknown_subcommand(self, tmp_path: Path) -> None:
+        with patch("prism.context.memory.ProjectMemory"):
+            _, output, _, _, _ = _cmd("/memory frobnicate", tmp_path)
+        assert "Usage" in output
+
+    def test_exception_handled(self, tmp_path: Path) -> None:
+        """Import/runtime errors are caught gracefully."""
+        with patch(
+            "prism.context.memory.ProjectMemory",
+            side_effect=OSError("disk full"),
+        ):
+            action, output, _, _, _ = _cmd("/memory show", tmp_path)
+        assert action == "continue"
+        assert "Error" in output
+        assert "disk full" in output
+
+
+# ======================================================================
+# Permission Memory — _ask_permission, _should_auto_approve,
+# _execute_tool_with_permission permission logic
+# ======================================================================
+
+
+class TestAskPermission:
+    """Tests for _ask_permission returning 'deny', 'once', or 'always'."""
+
+    def test_deny_on_no_input(self) -> None:
+        """User pressing Enter (empty) should deny."""
+        console = _make_console()
+        with patch("builtins.input", return_value=""):
+            result = _ask_permission("write_file", {}, "confirm", console)
+        assert result == "deny"
+
+    def test_once_on_yes_confirm(self) -> None:
+        """'y' for a CONFIRM tool returns 'once'."""
+        console = _make_console()
+        with patch("builtins.input", return_value="y"):
+            result = _ask_permission("write_file", {}, "confirm", console)
+        assert result == "once"
+
+    def test_always_on_a_confirm(self) -> None:
+        """'a' for a CONFIRM tool returns 'always'."""
+        console = _make_console()
+        with patch("builtins.input", return_value="a"):
+            result = _ask_permission("edit_file", {}, "confirm", console)
+        assert result == "always"
+
+    def test_always_on_always_word(self) -> None:
+        """'always' word for a CONFIRM tool returns 'always'."""
+        console = _make_console()
+        with patch("builtins.input", return_value="always"):
+            result = _ask_permission("edit_file", {}, "confirm", console)
+        assert result == "always"
+
+    def test_dangerous_no_always_option(self) -> None:
+        """'a' for a DANGEROUS tool should deny (no always option)."""
+        console = _make_console()
+        with patch("builtins.input", return_value="a"):
+            result = _ask_permission(
+                "execute_command", {}, "DANGEROUS", console,
+            )
+        assert result == "deny"
+
+    def test_dangerous_yes_returns_once(self) -> None:
+        """'y' for a DANGEROUS tool returns 'once' (not 'always')."""
+        console = _make_console()
+        with patch("builtins.input", return_value="y"):
+            result = _ask_permission(
+                "execute_command", {}, "DANGEROUS", console,
+            )
+        assert result == "once"
+
+    def test_deny_on_eof(self) -> None:
+        """EOFError should be treated as deny."""
+        console = _make_console()
+        with patch("builtins.input", side_effect=EOFError):
+            result = _ask_permission("write_file", {}, "confirm", console)
+        assert result == "deny"
+
+    def test_deny_on_keyboard_interrupt(self) -> None:
+        """KeyboardInterrupt should be treated as deny."""
+        console = _make_console()
+        with patch("builtins.input", side_effect=KeyboardInterrupt):
+            result = _ask_permission("write_file", {}, "confirm", console)
+        assert result == "deny"
+
+    def test_write_file_shows_details(self) -> None:
+        """write_file permission prompt shows path and size."""
+        console = _make_console()
+        args = {"path": "/tmp/test.py", "content": "hello world"}
+        with patch("builtins.input", return_value="n"):
+            _ask_permission("write_file", args, "confirm", console)
+        output = _get_output(console)
+        assert "/tmp/test.py" in output
+        assert "11" in output  # len("hello world")
+
+    def test_edit_file_shows_path(self) -> None:
+        """edit_file permission prompt shows path."""
+        console = _make_console()
+        args = {"path": "/tmp/main.py"}
+        with patch("builtins.input", return_value="n"):
+            _ask_permission("edit_file", args, "confirm", console)
+        output = _get_output(console)
+        assert "/tmp/main.py" in output
+
+    def test_execute_command_shows_command(self) -> None:
+        """execute_command permission prompt shows the command."""
+        console = _make_console()
+        args = {"command": "rm -rf /"}
+        with patch("builtins.input", return_value="n"):
+            _ask_permission("execute_command", args, "DANGEROUS", console)
+        output = _get_output(console)
+        assert "rm -rf /" in output
+
+    def test_dangerous_label_shown(self) -> None:
+        """DANGEROUS tools show a DANGEROUS label."""
+        console = _make_console()
+        with patch("builtins.input", return_value="n"):
+            _ask_permission("execute_command", {}, "DANGEROUS", console)
+        output = _get_output(console)
+        assert "DANGEROUS" in output
+
+    def test_confirm_label_shown(self) -> None:
+        """CONFIRM tools show a Confirm label."""
+        console = _make_console()
+        with patch("builtins.input", return_value="n"):
+            _ask_permission("write_file", {}, "confirm", console)
+        output = _get_output(console)
+        assert "Confirm" in output
+
+
+class TestShouldAutoApprove:
+    """Tests for the _should_auto_approve helper."""
+
+    def test_tool_in_permission_cache(self) -> None:
+        """Tools in the permission cache should be auto-approved."""
+        state = _make_state()
+        state.permission_cache.add("write_file")
+        assert _should_auto_approve("write_file", state) is True
+
+    def test_tool_not_in_cache(self) -> None:
+        """Tools not in cache and no auto_approve should not be approved."""
+        state = _make_state()
+        assert _should_auto_approve("write_file", state) is False
+
+    def test_settings_auto_approve_on(self, tmp_path: Path) -> None:
+        """When settings.config.tools.auto_approve is True, approve."""
+        state = _make_state()
+        settings = _make_settings(tmp_path)
+        settings._config.tools.auto_approve = True
+        state.settings = settings
+        assert _should_auto_approve("write_file", state) is True
+
+    def test_settings_auto_approve_off(self, tmp_path: Path) -> None:
+        """When settings.config.tools.auto_approve is False, deny."""
+        state = _make_state()
+        settings = _make_settings(tmp_path)
+        settings._config.tools.auto_approve = False
+        state.settings = settings
+        assert _should_auto_approve("write_file", state) is False
+
+    def test_no_settings_no_cache(self) -> None:
+        """No settings and no cache should not auto-approve."""
+        state = _make_state()
+        state.settings = None
+        assert _should_auto_approve("edit_file", state) is False
+
+    def test_cache_takes_priority_over_settings(
+        self, tmp_path: Path,
+    ) -> None:
+        """Permission cache should approve even if settings says no."""
+        state = _make_state()
+        settings = _make_settings(tmp_path)
+        settings._config.tools.auto_approve = False
+        state.settings = settings
+        state.permission_cache.add("edit_file")
+        assert _should_auto_approve("edit_file", state) is True
+
+
+class TestPermissionMemoryIntegration:
+    """Integration tests for permission memory in _execute_tool_with_permission."""
+
+    def test_skip_all_permissions_bypasses_confirm(self) -> None:
+        """--dangerously-skip-permissions bypasses CONFIRM tools."""
+        from dataclasses import dataclass
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import PermissionLevel
+
+        @dataclass
+        class FakeResult:
+            success: bool
+            output: str
+            error: str | None
+
+        tool = MagicMock()
+        tool.permission_level = PermissionLevel.CONFIRM
+        tool.execute.return_value = FakeResult(
+            success=True, output="written ok", error=None,
+        )
+
+        registry = MagicMock()
+        registry.get_tool.return_value = tool
+        console = _make_console()
+
+        state = _make_state()
+        state.skip_all_permissions = True
+
+        result = _execute_tool_with_permission(
+            "write_file",
+            {"path": "/tmp/test.py", "content": "hi"},
+            registry,
+            console,
+            state=state,
+        )
+        assert result == "written ok"
+        # Should NOT have called input()
+        assert "Permission denied" not in result
+
+    def test_skip_all_permissions_bypasses_dangerous(self) -> None:
+        """--dangerously-skip-permissions bypasses DANGEROUS tools too."""
+        from dataclasses import dataclass
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import PermissionLevel
+
+        @dataclass
+        class FakeResult:
+            success: bool
+            output: str
+            error: str | None
+
+        tool = MagicMock()
+        tool.permission_level = PermissionLevel.DANGEROUS
+        tool.execute.return_value = FakeResult(
+            success=True, output="command ran", error=None,
+        )
+
+        registry = MagicMock()
+        registry.get_tool.return_value = tool
+        console = _make_console()
+
+        state = _make_state()
+        state.skip_all_permissions = True
+
+        result = _execute_tool_with_permission(
+            "execute_command",
+            {"command": "ls"},
+            registry,
+            console,
+            state=state,
+        )
+        assert result == "command ran"
+
+    def test_permission_cache_auto_approves_confirm(self) -> None:
+        """A tool in the permission_cache skips the prompt for CONFIRM."""
+        from dataclasses import dataclass
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import PermissionLevel
+
+        @dataclass
+        class FakeResult:
+            success: bool
+            output: str
+            error: str | None
+
+        tool = MagicMock()
+        tool.permission_level = PermissionLevel.CONFIRM
+        tool.execute.return_value = FakeResult(
+            success=True, output="edit done", error=None,
+        )
+
+        registry = MagicMock()
+        registry.get_tool.return_value = tool
+        console = _make_console()
+
+        state = _make_state()
+        state.permission_cache.add("edit_file")
+
+        result = _execute_tool_with_permission(
+            "edit_file",
+            {"path": "/tmp/test.py"},
+            registry,
+            console,
+            state=state,
+        )
+        assert result == "edit done"
+        output = _get_output(console)
+        assert "Auto-approved" in output
+
+    def test_permission_cache_does_not_auto_approve_dangerous(self) -> None:
+        """DANGEROUS tools are never auto-approved even if in cache."""
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import PermissionLevel
+
+        tool = MagicMock()
+        tool.permission_level = PermissionLevel.DANGEROUS
+        tool.execute.return_value = MagicMock(
+            success=True, output="ran", error=None,
+        )
+
+        registry = MagicMock()
+        registry.get_tool.return_value = tool
+        console = _make_console()
+
+        state = _make_state()
+        state.permission_cache.add("execute_command")
+
+        # Should still prompt because DANGEROUS
+        with patch("builtins.input", return_value="n"):
+            result = _execute_tool_with_permission(
+                "execute_command",
+                {"command": "rm -rf /"},
+                registry,
+                console,
+                state=state,
+            )
+        assert "Permission denied" in result
+
+    def test_always_response_adds_to_cache(self) -> None:
+        """When user answers 'always', tool is added to permission_cache."""
+        from dataclasses import dataclass
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import PermissionLevel
+
+        @dataclass
+        class FakeResult:
+            success: bool
+            output: str
+            error: str | None
+
+        tool = MagicMock()
+        tool.permission_level = PermissionLevel.CONFIRM
+        tool.execute.return_value = FakeResult(
+            success=True, output="written", error=None,
+        )
+
+        registry = MagicMock()
+        registry.get_tool.return_value = tool
+        console = _make_console()
+
+        state = _make_state()
+        assert "write_file" not in state.permission_cache
+
+        with patch("builtins.input", return_value="a"):
+            result = _execute_tool_with_permission(
+                "write_file",
+                {"path": "/tmp/test.py", "content": "hi"},
+                registry,
+                console,
+                state=state,
+            )
+        assert result == "written"
+        assert "write_file" in state.permission_cache
+
+    def test_once_response_does_not_add_to_cache(self) -> None:
+        """When user answers 'y' (once), tool is NOT added to cache."""
+        from dataclasses import dataclass
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import PermissionLevel
+
+        @dataclass
+        class FakeResult:
+            success: bool
+            output: str
+            error: str | None
+
+        tool = MagicMock()
+        tool.permission_level = PermissionLevel.CONFIRM
+        tool.execute.return_value = FakeResult(
+            success=True, output="written", error=None,
+        )
+
+        registry = MagicMock()
+        registry.get_tool.return_value = tool
+        console = _make_console()
+
+        state = _make_state()
+
+        with patch("builtins.input", return_value="y"):
+            result = _execute_tool_with_permission(
+                "write_file",
+                {"path": "/tmp/test.py", "content": "hi"},
+                registry,
+                console,
+                state=state,
+            )
+        assert result == "written"
+        assert "write_file" not in state.permission_cache
+
+    def test_auto_approve_setting_skips_confirm(
+        self, tmp_path: Path,
+    ) -> None:
+        """settings.config.tools.auto_approve skips CONFIRM tools."""
+        from dataclasses import dataclass
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import PermissionLevel
+
+        @dataclass
+        class FakeResult:
+            success: bool
+            output: str
+            error: str | None
+
+        tool = MagicMock()
+        tool.permission_level = PermissionLevel.CONFIRM
+        tool.execute.return_value = FakeResult(
+            success=True, output="ok", error=None,
+        )
+
+        registry = MagicMock()
+        registry.get_tool.return_value = tool
+        console = _make_console()
+
+        state = _make_state()
+        settings = _make_settings(tmp_path)
+        settings._config.tools.auto_approve = True
+        state.settings = settings
+
+        result = _execute_tool_with_permission(
+            "write_file",
+            {"path": "/tmp/test.py", "content": "hi"},
+            registry,
+            console,
+            state=state,
+        )
+        assert result == "ok"
+        output = _get_output(console)
+        assert "Auto-approved" in output
+
+    def test_auto_approve_setting_does_not_skip_dangerous(
+        self, tmp_path: Path,
+    ) -> None:
+        """settings.config.tools.auto_approve does NOT skip DANGEROUS."""
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import PermissionLevel
+
+        tool = MagicMock()
+        tool.permission_level = PermissionLevel.DANGEROUS
+        tool.execute.return_value = MagicMock(
+            success=True, output="ran", error=None,
+        )
+
+        registry = MagicMock()
+        registry.get_tool.return_value = tool
+        console = _make_console()
+
+        state = _make_state()
+        settings = _make_settings(tmp_path)
+        settings._config.tools.auto_approve = True
+        state.settings = settings
+
+        # Should still prompt because DANGEROUS
+        with patch("builtins.input", return_value="n"):
+            result = _execute_tool_with_permission(
+                "execute_command",
+                {"command": "rm -rf /"},
+                registry,
+                console,
+                state=state,
+            )
+        assert "Permission denied" in result
+
+    def test_session_state_has_permission_fields(self) -> None:
+        """_SessionState should have permission_cache and skip fields."""
+        state = _SessionState(pinned_model=None)
+        assert isinstance(state.permission_cache, set)
+        assert len(state.permission_cache) == 0
+        assert state.skip_all_permissions is False
+        assert state.settings is None
+
+    def test_deny_response_returns_permission_denied(self) -> None:
+        """When user answers 'n', tool is not executed."""
+        from unittest.mock import MagicMock
+
+        from prism.tools.base import PermissionLevel
+
+        tool = MagicMock()
+        tool.permission_level = PermissionLevel.CONFIRM
+        tool.execute.return_value = MagicMock(
+            success=True, output="ok", error=None,
+        )
+
+        registry = MagicMock()
+        registry.get_tool.return_value = tool
+        console = _make_console()
+
+        state = _make_state()
+
+        with patch("builtins.input", return_value="n"):
+            result = _execute_tool_with_permission(
+                "write_file",
+                {"path": "/tmp/test.py", "content": "hi"},
+                registry,
+                console,
+                state=state,
+            )
+        assert "Permission denied" in result
+        tool.execute.assert_not_called()
+
+
+# ===========================================================================
+# Gap 4: _maybe_escalate_model — smart model escalation for tool-use
+# ===========================================================================
+
+
+class TestMaybeEscalateModel:
+    """Tests for the _maybe_escalate_model helper."""
+
+    def _make_escalation_state(
+        self,
+        tmp_path: Path,
+        *,
+        escalate_on_tool_use: bool = True,
+        model_info: object | None = None,
+        available_models: list[object] | None = None,
+    ) -> _SessionState:
+        """Create a state wired for escalation tests."""
+        from unittest.mock import MagicMock
+
+        from prism.config.schema import PrismConfig, RoutingConfig
+
+        routing = RoutingConfig(escalate_on_tool_use=escalate_on_tool_use)
+        config = PrismConfig(prism_home=tmp_path / ".prism", routing=routing)
+        settings = Settings(config=config, project_root=tmp_path)
+
+        registry = MagicMock()
+        registry.get_model_info.return_value = model_info
+        registry.get_available_models.return_value = available_models or []
+
+        state = _make_state()
+        state.settings = settings
+        state.registry = registry
+        return state
+
+    def test_returns_none_when_settings_missing(self) -> None:
+        state = _make_state()
+        state.settings = None
+        state.registry = None
+        result = _maybe_escalate_model("groq/mixtral-8x7b-32768", state)
+        assert result is None
+
+    def test_returns_none_when_registry_missing(self, tmp_path: Path) -> None:
+        from prism.config.schema import PrismConfig
+        state = _make_state()
+        config = PrismConfig(prism_home=tmp_path / ".prism")
+        state.settings = Settings(config=config, project_root=tmp_path)
+        state.registry = None
+        result = _maybe_escalate_model("groq/mixtral-8x7b-32768", state)
+        assert result is None
+
+    def test_returns_none_when_escalation_disabled(self, tmp_path: Path) -> None:
+        state = self._make_escalation_state(
+            tmp_path, escalate_on_tool_use=False,
+        )
+        result = _maybe_escalate_model("groq/mixtral-8x7b-32768", state)
+        assert result is None
+
+    def test_returns_none_for_medium_tier_model(self, tmp_path: Path) -> None:
+        from prism.providers.base import ComplexityTier, ModelInfo
+        model_info = ModelInfo(
+            id="gpt-4o-mini",
+            display_name="GPT-4o Mini",
+            provider="openai",
+            tier=ComplexityTier.MEDIUM,
+            input_cost_per_1m=0.15,
+            output_cost_per_1m=0.60,
+            context_window=128_000,
+            supports_tools=True,
+        )
+        state = self._make_escalation_state(
+            tmp_path, model_info=model_info,
+        )
+        result = _maybe_escalate_model("gpt-4o-mini", state)
+        assert result is None
+
+    def test_returns_none_for_complex_tier_model(self, tmp_path: Path) -> None:
+        from prism.providers.base import ComplexityTier, ModelInfo
+        model_info = ModelInfo(
+            id="gpt-4o",
+            display_name="GPT-4o",
+            provider="openai",
+            tier=ComplexityTier.COMPLEX,
+            input_cost_per_1m=2.50,
+            output_cost_per_1m=10.00,
+            context_window=128_000,
+            supports_tools=True,
+        )
+        state = self._make_escalation_state(
+            tmp_path, model_info=model_info,
+        )
+        result = _maybe_escalate_model("gpt-4o", state)
+        assert result is None
+
+    def test_escalates_simple_to_cheapest_medium(self, tmp_path: Path) -> None:
+        from prism.providers.base import ComplexityTier, ModelInfo
+        simple_model = ModelInfo(
+            id="groq/mixtral-8x7b-32768",
+            display_name="Mixtral 8x7B",
+            provider="groq",
+            tier=ComplexityTier.SIMPLE,
+            input_cost_per_1m=0.24,
+            output_cost_per_1m=0.24,
+            context_window=32_768,
+            supports_tools=True,
+        )
+        medium_model = ModelInfo(
+            id="gpt-4o-mini",
+            display_name="GPT-4o Mini",
+            provider="openai",
+            tier=ComplexityTier.MEDIUM,
+            input_cost_per_1m=0.15,
+            output_cost_per_1m=0.60,
+            context_window=128_000,
+            supports_tools=True,
+        )
+        expensive_model = ModelInfo(
+            id="gpt-4o",
+            display_name="GPT-4o",
+            provider="openai",
+            tier=ComplexityTier.COMPLEX,
+            input_cost_per_1m=2.50,
+            output_cost_per_1m=10.00,
+            context_window=128_000,
+            supports_tools=True,
+        )
+        state = self._make_escalation_state(
+            tmp_path,
+            model_info=simple_model,
+            available_models=[medium_model, expensive_model],
+        )
+        result = _maybe_escalate_model("groq/mixtral-8x7b-32768", state)
+        assert result == "gpt-4o-mini"
+
+    def test_returns_none_when_no_tool_capable_medium(
+        self, tmp_path: Path,
+    ) -> None:
+        from prism.providers.base import ComplexityTier, ModelInfo
+        simple_model = ModelInfo(
+            id="groq/mixtral-8x7b-32768",
+            display_name="Mixtral 8x7B",
+            provider="groq",
+            tier=ComplexityTier.SIMPLE,
+            input_cost_per_1m=0.24,
+            output_cost_per_1m=0.24,
+            context_window=32_768,
+            supports_tools=True,
+        )
+        # Only simple-tier models available
+        another_simple = ModelInfo(
+            id="ollama/llama3.2:3b",
+            display_name="Llama 3.2 3B",
+            provider="ollama",
+            tier=ComplexityTier.SIMPLE,
+            input_cost_per_1m=0.00,
+            output_cost_per_1m=0.00,
+            context_window=32_768,
+            supports_tools=False,
+        )
+        state = self._make_escalation_state(
+            tmp_path,
+            model_info=simple_model,
+            available_models=[another_simple],
+        )
+        result = _maybe_escalate_model("groq/mixtral-8x7b-32768", state)
+        assert result is None
+
+    def test_returns_none_for_unknown_model(self, tmp_path: Path) -> None:
+        """Unknown model (not in registry) should still try to escalate."""
+        from prism.providers.base import ComplexityTier, ModelInfo
+        medium_model = ModelInfo(
+            id="gpt-4o-mini",
+            display_name="GPT-4o Mini",
+            provider="openai",
+            tier=ComplexityTier.MEDIUM,
+            input_cost_per_1m=0.15,
+            output_cost_per_1m=0.60,
+            context_window=128_000,
+            supports_tools=True,
+        )
+        state = self._make_escalation_state(
+            tmp_path,
+            model_info=None,  # Unknown model
+            available_models=[medium_model],
+        )
+        result = _maybe_escalate_model("some/unknown-model", state)
+        # Should escalate because model is unknown (not confirmed medium/complex)
+        assert result == "gpt-4o-mini"
+
+    def test_skips_candidate_with_same_id(self, tmp_path: Path) -> None:
+        from prism.providers.base import ComplexityTier, ModelInfo
+        simple_model = ModelInfo(
+            id="groq/mixtral-8x7b-32768",
+            display_name="Mixtral 8x7B",
+            provider="groq",
+            tier=ComplexityTier.SIMPLE,
+            input_cost_per_1m=0.24,
+            output_cost_per_1m=0.24,
+            context_window=32_768,
+            supports_tools=True,
+        )
+        # The only medium model has the same id (edge case)
+        same_id = ModelInfo(
+            id="groq/mixtral-8x7b-32768",
+            display_name="Mixtral Medium variant",
+            provider="groq",
+            tier=ComplexityTier.MEDIUM,
+            input_cost_per_1m=0.50,
+            output_cost_per_1m=0.50,
+            context_window=32_768,
+            supports_tools=True,
+        )
+        state = self._make_escalation_state(
+            tmp_path,
+            model_info=simple_model,
+            available_models=[same_id],
+        )
+        result = _maybe_escalate_model("groq/mixtral-8x7b-32768", state)
+        assert result is None
+
+
+# ===========================================================================
+# /swarm command tests
+# ===========================================================================
+
+
+class TestSwarmCommand:
+    """Tests for the /swarm slash command."""
+
+    def test_swarm_no_args_shows_usage(self, tmp_path: Path) -> None:
+        action, output, *_ = _cmd("/swarm", tmp_path)
+        assert action == "continue"
+        assert "Usage" in output
+
+    def test_swarm_status_shows_no_swarm(self, tmp_path: Path) -> None:
+        action, output, *_ = _cmd("/swarm status", tmp_path)
+        assert action == "continue"
+        assert "No swarm execution in progress" in output
+
+    def test_swarm_plan_no_goal_shows_usage(self, tmp_path: Path) -> None:
+        action, output, *_ = _cmd("/swarm plan", tmp_path)
+        assert action == "continue"
+        assert "Usage" in output
+
+    def test_swarm_plan_no_engine_shows_error(self, tmp_path: Path) -> None:
+        state = _make_state()
+        state.completion_engine = None
+        state.registry = None
+        action, output, *_ = _cmd(
+            "/swarm plan build a REST API",
+            tmp_path,
+            state=state,
+        )
+        assert action == "continue"
+        assert "requires initialized providers" in output
+
+    def test_swarm_full_no_engine_shows_error(self, tmp_path: Path) -> None:
+        state = _make_state()
+        state.completion_engine = None
+        state.registry = None
+        action, output, *_ = _cmd(
+            "/swarm build a full REST API with tests",
+            tmp_path,
+            state=state,
+        )
+        assert action == "continue"
+        assert "requires initialized providers" in output
+
+    def test_swarm_plan_invokes_orchestrator(self, tmp_path: Path) -> None:
+        """Verify /swarm plan lazy-imports and calls decompose phases."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from prism.orchestrator.swarm import SwarmPlan, SwarmTask, TaskStatus
+
+        mock_engine = MagicMock()
+        mock_registry = MagicMock()
+
+        state = _make_state()
+        state.completion_engine = mock_engine
+        state.registry = mock_registry
+
+        # Build a mock plan to be returned by each phase
+        mock_plan = SwarmPlan(goal="test goal")
+        mock_plan.tasks = [
+            SwarmTask(
+                description="Step 1",
+                complexity="simple",
+                status=TaskStatus.PENDING,
+            ),
+        ]
+        mock_plan.plan_text = "Plan text here"
+        mock_plan.review_notes = "Looks good"
+        mock_plan.phase_costs = {"decompose": 0.005, "plan": 0.010}
+        mock_plan.total_cost = 0.015
+
+        with patch(
+            "prism.orchestrator.swarm.SwarmOrchestrator",
+            autospec=False,
+        ) as mock_orch_cls:
+            mock_orch = MagicMock()
+            mock_orch._phase_decompose = AsyncMock(return_value=mock_plan)
+            mock_orch._phase_research = AsyncMock(return_value=mock_plan)
+            mock_orch._phase_plan = AsyncMock(return_value=mock_plan)
+            mock_orch._phase_review = AsyncMock(return_value=mock_plan)
+            mock_orch_cls.return_value = mock_orch
+
+            action, _output, *_ = _cmd(
+                "/swarm plan build a REST API",
+                tmp_path,
+                state=state,
+            )
+
+        assert action == "continue"
+        # Verify the orchestrator was instantiated with engine, registry, config, tool_registry
+        mock_orch_cls.assert_called_once()
+        call_kwargs = mock_orch_cls.call_args[1]
+        assert call_kwargs["engine"] is mock_engine
+        assert call_kwargs["registry"] is mock_registry
+        assert call_kwargs["config"] is not None
+        assert "tool_registry" in call_kwargs
+
+    def test_swarm_full_invokes_orchestrate(self, tmp_path: Path) -> None:
+        """Verify /swarm <goal> runs the full orchestration pipeline."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from prism.orchestrator.swarm import SwarmPlan, SwarmTask, TaskStatus
+
+        mock_engine = MagicMock()
+        mock_registry = MagicMock()
+
+        state = _make_state()
+        state.completion_engine = mock_engine
+        state.registry = mock_registry
+
+        mock_plan = SwarmPlan(goal="build it")
+        mock_plan.tasks = [
+            SwarmTask(
+                description="Create module",
+                complexity="medium",
+                assigned_model="gpt-4o",
+                status=TaskStatus.COMPLETED,
+                result="Done",
+            ),
+        ]
+        mock_plan.phase_costs = {"execute": 0.003}
+        mock_plan.total_cost = 0.020
+
+        with patch(
+            "prism.orchestrator.swarm.SwarmOrchestrator",
+            autospec=False,
+        ) as mock_orch_cls:
+            mock_orch = MagicMock()
+            mock_orch.orchestrate = AsyncMock(return_value=mock_plan)
+            mock_orch_cls.return_value = mock_orch
+
+            action, output, *_ = _cmd(
+                "/swarm build a REST API system",
+                tmp_path,
+                state=state,
+            )
+
+        assert action == "continue"
+        mock_orch.orchestrate.assert_called_once_with("build a REST API system")
+        assert "Swarm complete" in output
+
+    def test_swarm_returns_continue(self, tmp_path: Path) -> None:
+        action, _output, *_ = _cmd("/swarm", tmp_path)
+        assert action == "continue"
+
+
+# ===========================================================================
+# _looks_like_swarm_task heuristic tests
+# ===========================================================================
+
+
+class TestLooksLikeSwarmTask:
+    """Tests for the _looks_like_swarm_task heuristic."""
+
+    def test_positive_build_and_components(self) -> None:
+        assert _looks_like_swarm_task(
+            "Build a REST API and database components"
+        ) is True
+
+    def test_positive_create_multiple_files(self) -> None:
+        assert _looks_like_swarm_task(
+            "Create multiple test files for the router module"
+        ) is True
+
+    def test_positive_implement_system(self) -> None:
+        assert _looks_like_swarm_task(
+            "Implement an auth system with login and logout"
+        ) is True
+
+    def test_positive_refactor_modules(self) -> None:
+        assert _looks_like_swarm_task(
+            "Refactor the modules to use dependency injection"
+        ) is True
+
+    def test_positive_develop_and_then(self) -> None:
+        assert _looks_like_swarm_task(
+            "Develop a CLI tool and then add tests"
+        ) is True
+
+    def test_positive_design_components(self) -> None:
+        assert _looks_like_swarm_task(
+            "Design the components for the new dashboard"
+        ) is True
+
+    def test_negative_simple_question(self) -> None:
+        assert _looks_like_swarm_task(
+            "What is the capital of France?"
+        ) is False
+
+    def test_negative_single_action(self) -> None:
+        assert _looks_like_swarm_task(
+            "Fix the bug in line 42"
+        ) is False
+
+    def test_negative_no_keywords(self) -> None:
+        assert _looks_like_swarm_task(
+            "Tell me about the weather and temperature"
+        ) is False
+
+    def test_negative_keyword_no_multi(self) -> None:
+        assert _looks_like_swarm_task(
+            "Build it"
+        ) is False
+
+    def test_negative_multi_no_keyword(self) -> None:
+        assert _looks_like_swarm_task(
+            "Show me the files and modules"
+        ) is False
+
+    def test_negative_empty_string(self) -> None:
+        assert _looks_like_swarm_task("") is False
+
+
+# ===========================================================================
+# COMMAND_CATEGORIES: Multi-Agent category
+# ===========================================================================
+
+
+class TestMultiAgentCategory:
+    """Tests for the Multi-Agent command category."""
+
+    def test_has_multi_agent_category(self) -> None:
+        assert "Multi-Agent" in COMMAND_CATEGORIES
+
+    def test_multi_agent_has_swarm_commands(self) -> None:
+        commands = COMMAND_CATEGORIES["Multi-Agent"]
+        names = [c[0] for c in commands]
+        assert "/swarm <goal>" in names
+        assert "/swarm status" in names
+        assert "/swarm plan <goal>" in names

@@ -18,11 +18,12 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.key_binding import KeyBindings
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+
+from prism.cli.keybindings import create_keybindings
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -103,6 +104,18 @@ COMMAND_CATEGORIES: dict[str, list[tuple[str, str]]] = {
         ("/architect status [id]", "Show plan status"),
         ("/architect rollback [id]", "Rollback a plan"),
     ],
+    "Smart Tools (unique to Prism)": [
+        ("/test [files]", "Auto-discover and run relevant tests"),
+        ("/quality [files]", "Run lint + security + type checks (alias: /lint)"),
+        ("/optimize [report|recommend]", "Cost optimization recommendations"),
+        ("/memory [show|add|remove] [key] [value]",
+         "Project memory (PRISM_MEMORY.md)"),
+    ],
+    "Multi-Agent": [
+        ("/swarm <goal>", "Multi-model collaborative task execution"),
+        ("/swarm status", "Show current swarm execution status"),
+        ("/swarm plan <goal>", "Plan only — show decomposition without executing"),
+    ],
     "Infrastructure": [
         ("/undo [N|all]",
          "Undo last N changes with diff"),
@@ -136,6 +149,9 @@ class _SessionState:
         cache_enabled: Whether response caching is active.
         sandbox_enabled: Whether sandbox execution is active.
         sandbox_type: Forced sandbox type (``None`` = auto).
+        permission_cache: Tool names approved for the session ("always").
+        skip_all_permissions: When True, skip all permission prompts.
+        settings: Reference to the Settings object.
     """
 
     def __init__(
@@ -144,13 +160,79 @@ class _SessionState:
         cache_enabled: bool = True,
     ) -> None:
         self.active_files: list[str] = []
-        self.conversation: list[dict[str, str]] = []
+        self.conversation: list[dict[str, Any]] = []
         self.pinned_model: str | None = pinned_model
         self.web_enabled: bool = False
         self.session_id: str = ""
         self.cache_enabled: bool = cache_enabled
         self.sandbox_enabled: bool = True
         self.sandbox_type: str | None = None
+
+        # Permission memory — tools approved for the session
+        self.permission_cache: set[str] = set()
+        self.skip_all_permissions: bool = False
+        self.settings: Any | None = None
+
+        # Full module stack — populated in run_repl()
+        self.db: Any | None = None
+        self.auth: Any | None = None
+        self.registry: Any | None = None
+        self.cost_tracker: Any | None = None
+        self.classifier: Any | None = None
+        self.selector: Any | None = None
+        self.fallback_builder: Any | None = None
+        self.learner: Any | None = None
+        self.completion_engine: Any | None = None
+        self.tool_registry: Any | None = None
+        self.session_manager: Any | None = None
+        self.hook_manager: Any | None = None
+        self.prompt_enhancer: Any | None = None
+        self.mcp_client: Any | None = None
+        self.rate_limiter: Any | None = None
+        self.audit_logger: Any | None = None
+        self.auto_committer: Any | None = None
+        self.privacy_manager: Any | None = None
+        self.offline_manager: Any | None = None
+
+
+# ======================================================================
+# Completer — slash commands + file paths
+# ======================================================================
+
+def _build_completer() -> Any:
+    """Build a completer that handles slash commands and file paths."""
+    from prompt_toolkit.completion import (
+        Completer,
+        Completion,
+        PathCompleter,
+        merge_completers,
+    )
+
+    slash_commands = sorted({
+        "/help", "/quit", "/exit", "/cost", "/model", "/add", "/drop",
+        "/compact", "/undo", "/web", "/status", "/clear", "/cache",
+        "/compare", "/image", "/branch", "/rollback", "/sandbox",
+        "/tasks", "/privacy", "/plugins", "/forecast", "/workspace",
+        "/offline", "/debate", "/blast", "/impact", "/gaps", "/deps",
+        "/arch", "/debug-memory", "/history", "/budget", "/architect",
+        "/ignore", "/aei", "/blame", "/context", "/why", "/debates",
+        "/test", "/autotest", "/quality", "/lint", "/optimize", "/memory",
+    })
+
+    class SlashCommandCompleter(Completer):
+        """Complete slash commands."""
+
+        def get_completions(self, document: Any, complete_event: Any) -> Any:
+            text = document.text_before_cursor
+            if text.startswith("/"):
+                for cmd in slash_commands:
+                    if cmd.startswith(text):
+                        yield Completion(cmd, start_position=-len(text))
+
+    return merge_completers([
+        SlashCommandCompleter(),
+        PathCompleter(expanduser=True),
+    ])
 
 
 # ======================================================================
@@ -163,6 +245,7 @@ def run_repl(
     dry_run: bool = False,
     offline: bool = False,
     no_cache: bool = False,
+    skip_permissions: bool = False,
 ) -> None:
     """Run the interactive REPL loop.
 
@@ -172,27 +255,53 @@ def run_repl(
         dry_run: If True, show routing decisions without executing.
         offline: If True, only use local models.
         no_cache: If True, disable response caching.
+        skip_permissions: If True, skip all permission prompts (dangerous).
     """
+    # Suppress all library noise — users should only see responses
+    import warnings
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
+    warnings.filterwarnings("ignore", message=".*Task was destroyed.*")
+    warnings.filterwarnings("ignore", message=".*coroutine.*was never awaited.*")
+    warnings.filterwarnings("ignore", message=".*unauthenticated.*HF Hub.*")
+
+    import litellm
+    litellm.suppress_debug_info = True
+    import logging as _logging
+    _logging.getLogger("LiteLLM").setLevel(_logging.CRITICAL)
+    _logging.getLogger("litellm").setLevel(_logging.CRITICAL)
+    _logging.getLogger("litellm.utils").setLevel(_logging.CRITICAL)
+    _logging.getLogger("litellm.cost_calculator").setLevel(_logging.CRITICAL)
+    _logging.getLogger("httpx").setLevel(_logging.WARNING)
+    _logging.getLogger("httpcore").setLevel(_logging.WARNING)
+    _logging.getLogger("huggingface_hub").setLevel(_logging.CRITICAL)
+
     history_path = settings.sessions_dir / "repl_history"
     history_path.parent.mkdir(parents=True, exist_ok=True)
-
-    bindings = KeyBindings()
-
-    @bindings.add("c-c")
-    def _handle_ctrl_c(event: object) -> None:
-        """Handle Ctrl+C — cancel current input."""
-        event.app.current_buffer.reset()  # type: ignore[union-attr]
-
-    session: PromptSession[str] = PromptSession(
-        history=FileHistory(str(history_path)),
-        key_bindings=bindings,
-        multiline=False,
-        enable_history_search=True,
-    )
 
     state = _SessionState(
         pinned_model=settings.config.pinned_model,
         cache_enabled=not no_cache,
+    )
+    state.settings = settings
+    state.skip_all_permissions = skip_permissions
+
+    if skip_permissions:
+        console.print(
+            "[bold red]All permission prompts disabled. "
+            "Tools will execute without confirmation.[/bold red]"
+        )
+
+    bindings = create_keybindings(state=state, console=console)
+
+    completer = _build_completer()
+
+    session: PromptSession[str] = PromptSession(
+        history=FileHistory(str(history_path)),
+        key_bindings=bindings,
+        completer=completer,
+        multiline=False,
+        enable_history_search=True,
+        wrap_lines=True,
     )
 
     # Generate a stable session id
@@ -200,14 +309,144 @@ def run_repl(
 
     state.session_id = str(uuid4())[:12]
 
-    console.print(
-        "[dim]Ready. Type your request or /help for commands.[/dim]\n"
-    )
+    # --- Initialize full module stack ---
+    try:
+        from pathlib import Path as _Path
+
+        from prism.auth.manager import AuthManager
+        from prism.cost.tracker import CostTracker
+        from prism.db.database import Database
+        from prism.llm.completion import CompletionEngine
+        from prism.llm.retry import RetryPolicy
+        from prism.providers.registry import ProviderRegistry
+        from prism.router.classifier import TaskClassifier
+        from prism.router.fallback import FallbackChain
+        from prism.router.learning import AdaptiveLearner
+        from prism.router.rate_limiter import RateLimiter
+        from prism.router.selector import ModelSelector
+        from prism.security.audit import AuditLogger
+        from prism.security.path_guard import PathGuard
+        from prism.security.sandbox import CommandSandbox
+        from prism.security.secret_filter import SecretFilter
+        from prism.tools.registry import ToolRegistry
+
+        db = Database(settings.db_path)
+        db.initialize()
+        state.db = db
+
+        auth = AuthManager()
+        state.auth = auth
+
+        registry = ProviderRegistry(settings, auth)
+        state.registry = registry
+
+        cost_tracker = CostTracker(db, settings)
+        state.cost_tracker = cost_tracker
+
+        state.classifier = TaskClassifier(settings)
+        state.selector = ModelSelector(settings, registry, cost_tracker)
+        state.fallback_builder = FallbackChain(registry)
+        state.learner = AdaptiveLearner()
+
+        state.completion_engine = CompletionEngine(
+            settings=settings,
+            cost_tracker=cost_tracker,
+            auth_manager=auth,
+            provider_registry=registry,
+            retry_policy=RetryPolicy(),
+        )
+
+        project_root = _Path.cwd().resolve()
+        path_guard = PathGuard(project_root=project_root)
+        secret_filter = SecretFilter()
+        sandbox = CommandSandbox(
+            project_root=project_root,
+            secret_filter=secret_filter,
+        )
+        state.rate_limiter = RateLimiter()
+        state.audit_logger = AuditLogger(settings.audit_log_path)
+        state.tool_registry = ToolRegistry.create_default(
+            path_guard, sandbox,
+            web_enabled=state.web_enabled,
+            cost_tracker=cost_tracker,
+            adaptive_learner=state.learner,
+        )
+
+        from prism.context.session import SessionManager
+        state.session_manager = SessionManager(settings.sessions_dir)
+
+        # Hook manager — pre/post tool execution hooks
+        from prism.cli.hooks import HookManager
+        state.hook_manager = HookManager(project_root)
+
+        # Prompt enhancer — injects project context into prompts
+        from prism.cli.prompt_enhancer import PromptEnhancer
+        state.prompt_enhancer = PromptEnhancer(project_root)
+
+        # Auto-committer — commit after file writes/edits
+        try:
+            from prism.git.auto_commit import AutoCommitter
+            from prism.git.operations import GitRepo
+
+            state.auto_committer = AutoCommitter(GitRepo(project_root))
+        except Exception:
+            logger.debug("auto_committer_init_skipped")
+
+        # Privacy manager — Ollama-only routing in private mode
+        try:
+            from prism.network.privacy import PrivacyManager
+
+            state.privacy_manager = PrivacyManager()
+        except Exception:
+            logger.debug("privacy_manager_init_skipped")
+
+        # Offline mode manager — connectivity monitoring
+        try:
+            from prism.network.offline import OfflineModeManager
+
+            state.offline_manager = OfflineModeManager()
+            if offline:
+                state.offline_manager.enable_manual_offline()
+        except Exception:
+            logger.debug("offline_manager_init_skipped")
+
+        # MCP client — connect to external tool servers
+        from prism.mcp.client import MCPClient
+        mcp = MCPClient(project_root)
+        mcp.load_config()
+        if mcp.servers:
+            mcp.connect_all()
+            console.print(
+                f"[green]MCP:[/green] {len(mcp.servers)} server(s)"
+            )
+        state.mcp_client = mcp
+
+        # Show available providers
+        available = registry.get_available_models()
+        if available:
+            providers_found = {m.provider for m in available}
+            console.print(
+                f"[green]Providers:[/green] {', '.join(sorted(providers_found))}  "
+                f"[dim]({len(available)} models)[/dim]"
+            )
+        else:
+            console.print(
+                "[yellow]No API keys found.[/yellow] "
+                "Run [bold]prism auth add <provider>[/bold] or "
+                "set environment variables."
+            )
+
+    except Exception as exc:
+        logger.debug("module_init_failed", error=str(exc))
 
     while True:
         try:
             try:
-                user_input = session.prompt("prism> ").strip()
+                from prompt_toolkit.formatted_text import HTML
+
+                user_input = session.prompt(
+                    HTML("<ansibrightcyan><b>&gt; </b></ansibrightcyan>")
+                ).strip()
             except KeyboardInterrupt:
                 continue
             except EOFError:
@@ -247,6 +486,13 @@ def run_repl(
                 "[red]An unexpected error occurred. "
                 "Check logs for details.[/]"
             )
+
+    # Cleanup MCP connections on exit
+    if state.mcp_client:
+        try:
+            state.mcp_client.disconnect_all()
+        except Exception:
+            logger.debug("mcp_disconnect_failed")
 
 
 # ======================================================================
@@ -320,6 +566,13 @@ def _dispatch_command(
         "/context": _cmd_context,
         "/why": _cmd_why,
         "/debates": _cmd_debates,
+        "/test": _cmd_autotest,
+        "/autotest": _cmd_autotest,
+        "/quality": _cmd_quality,
+        "/lint": _cmd_quality,
+        "/optimize": _cmd_optimize,
+        "/memory": _cmd_memory,
+        "/swarm": _cmd_swarm,
     }
 
     handler = dispatch.get(cmd)
@@ -2071,6 +2324,7 @@ def _cmd_tasks(
 def _cmd_privacy(
     args: str,
     console: Console,
+    state: _SessionState | None = None,
     **_: Any,
 ) -> str:
     """Privacy mode — Ollama-only routing."""
@@ -2080,7 +2334,13 @@ def _cmd_privacy(
             PrivacyManager,
         )
 
-        pm = PrivacyManager()
+        # Use the shared privacy manager from session state when available
+        if state is not None and state.privacy_manager is not None:
+            pm = state.privacy_manager
+        else:
+            pm = PrivacyManager()
+            if state is not None:
+                state.privacy_manager = pm
         sub = args.lower().strip()
 
         if sub == "on":
@@ -2501,13 +2761,20 @@ def _cmd_workspace(
 def _cmd_offline(
     args: str,
     console: Console,
+    state: _SessionState | None = None,
     **_: Any,
 ) -> str:
     """Offline mode — show status and queue."""
     try:
         from prism.network.offline import OfflineModeManager
 
-        om = OfflineModeManager()
+        # Use the shared offline manager from session state when available
+        if state is not None and state.offline_manager is not None:
+            om = state.offline_manager
+        else:
+            om = OfflineModeManager()
+            if state is not None:
+                state.offline_manager = om
 
         sub = args.lower().strip()
 
@@ -4733,9 +5000,1410 @@ def _cmd_debates(
     return "continue"
 
 
+def _cmd_autotest(
+    args: str,
+    console: Console,
+    state: _SessionState,
+    **_: Any,
+) -> str:
+    """Run auto-test: discover and execute relevant tests for changed files."""
+    try:
+        if not state.tool_registry:
+            console.print("[yellow]Tool registry not initialized.[/]")
+            return "continue"
+
+        tool = state.tool_registry.get_tool("auto_test")
+        changed_files = [f.strip() for f in args.split() if f.strip()] if args else []
+
+        if not changed_files:
+            # Auto-detect from git
+            import subprocess
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "HEAD"],
+                capture_output=True, text=True, timeout=10,
+            )
+            changed_files = [
+                f for f in result.stdout.strip().splitlines() if f.strip()
+            ]
+            if not changed_files:
+                result = subprocess.run(
+                    ["git", "diff", "--name-only", "--cached"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                changed_files = [
+                    f for f in result.stdout.strip().splitlines() if f.strip()
+                ]
+
+        if not changed_files:
+            console.print("[dim]No changed files detected. Pass files explicitly: /test file1.py file2.py[/dim]")
+            return "continue"
+
+        console.print(f"[dim]Running tests for {len(changed_files)} changed file(s)...[/dim]")
+        result = tool.execute({"changed_files": changed_files})
+
+        if result.success:
+            console.print(Panel(result.output, title="Test Results", border_style="green"))
+        else:
+            console.print(Panel(result.error or result.output, title="Test Results", border_style="red"))
+
+    except Exception as exc:
+        logger.debug("autotest_error", error=str(exc))
+        console.print(f"[red]Error:[/] {exc}")
+    return "continue"
+
+
+def _cmd_quality(
+    args: str,
+    console: Console,
+    state: _SessionState,
+    **_: Any,
+) -> str:
+    """Run quality gate: lint + security + type checks on files."""
+    try:
+        if not state.tool_registry:
+            console.print("[yellow]Tool registry not initialized.[/]")
+            return "continue"
+
+        tool = state.tool_registry.get_tool("quality_gate")
+        changed_files = [f.strip() for f in args.split() if f.strip()] if args else []
+
+        if not changed_files:
+            # Auto-detect from git
+            import subprocess
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "HEAD"],
+                capture_output=True, text=True, timeout=10,
+            )
+            changed_files = [
+                f for f in result.stdout.strip().splitlines() if f.strip()
+            ]
+
+        if not changed_files:
+            console.print("[dim]No changed files. Pass files explicitly: /quality file1.py[/dim]")
+            return "continue"
+
+        console.print(f"[dim]Running quality checks on {len(changed_files)} file(s)...[/dim]")
+        result = tool.execute({"changed_files": changed_files, "action": "check"})
+
+        if result.success:
+            console.print(Panel(result.output, title="Quality Gate", border_style="green"))
+        else:
+            console.print(Panel(result.error or result.output, title="Quality Gate", border_style="yellow"))
+
+    except Exception as exc:
+        logger.debug("quality_gate_error", error=str(exc))
+        console.print(f"[red]Error:[/] {exc}")
+    return "continue"
+
+
+def _cmd_optimize(
+    args: str,
+    console: Console,
+    state: _SessionState,
+    **_: Any,
+) -> str:
+    """Show cost optimization recommendations."""
+    try:
+        if not state.tool_registry:
+            console.print("[yellow]Tool registry not initialized.[/]")
+            return "continue"
+
+        try:
+            tool = state.tool_registry.get_tool("cost_optimizer")
+        except Exception:
+            console.print(
+                "[yellow]Cost optimizer requires usage history. "
+                "Make some API calls first.[/]"
+            )
+            return "continue"
+
+        action = args.strip() if args else "recommend"
+        result = tool.execute({"action": action})
+
+        if result.success:
+            console.print(Panel(
+                result.output,
+                title="Cost Optimization",
+                border_style="cyan",
+            ))
+        else:
+            console.print(f"[yellow]{result.error}[/]")
+
+    except Exception as exc:
+        logger.debug("optimize_error", error=str(exc))
+        console.print(f"[red]Error:[/] {exc}")
+    return "continue"
+
+
+def _cmd_memory(
+    args: str,
+    console: Console,
+    **_: Any,
+) -> str:
+    """Manage project memory (PRISM_MEMORY.md)."""
+    from pathlib import Path as _Path
+
+    try:
+        from prism.context.memory import ProjectMemory
+
+        memory = ProjectMemory(_Path.cwd())
+        parts = args.split(maxsplit=2) if args else []
+        sub = parts[0] if parts else "show"
+
+        if sub == "show":
+            facts = memory.get_facts()
+            if not facts:
+                console.print("[dim]No project memory facts stored. Use /memory add <key> <value>[/dim]")
+                return "continue"
+
+            table = Table(title="Project Memory")
+            table.add_column("Key", style="cyan")
+            table.add_column("Value")
+
+            for key, value in sorted(facts.items()):
+                table.add_row(key, value)
+
+            console.print(table)
+
+        elif sub == "add":
+            if len(parts) < 3:
+                console.print("[yellow]Usage: /memory add <key> <value>[/]")
+                return "continue"
+            key = parts[1]
+            value = parts[2]
+            memory.add_fact(key, value)
+            console.print(f"[green]Saved:[/] {key} = {value}")
+
+        elif sub == "remove":
+            if len(parts) < 2:
+                console.print("[yellow]Usage: /memory remove <key>[/]")
+                return "continue"
+            key = parts[1]
+            if memory.remove_fact(key):
+                console.print(f"[green]Removed:[/] {key}")
+            else:
+                console.print(f"[yellow]Key not found:[/] {key}")
+
+        elif sub == "clear":
+            memory.clear()
+            console.print("[green]Project memory cleared.[/]")
+
+        else:
+            console.print(
+                "[yellow]Usage: /memory [show|add|remove|clear] [key] [value][/]"
+            )
+
+    except Exception as exc:
+        logger.debug("memory_cmd_error", error=str(exc))
+        console.print(f"[red]Error:[/] {exc}")
+    return "continue"
+
+
+def _cmd_swarm(
+    args: str,
+    console: Console,
+    state: _SessionState,
+    settings: Settings,
+    **_: Any,
+) -> str:
+    """Multi-model collaborative task execution via swarm orchestration.
+
+    Subcommands:
+        ``plan <goal>``  -- Decompose + research + plan only (no execution).
+        ``status``       -- Show current swarm execution status.
+        ``<goal>``       -- Full seven-phase orchestration pipeline.
+    """
+    try:
+        from prism.orchestrator.swarm import (
+            SwarmConfig,
+            SwarmOrchestrator,
+            SwarmPhase,
+            SwarmPlan,
+            TaskStatus,
+        )
+
+        parts = args.split(maxsplit=1)
+        sub = parts[0].lower() if parts else ""
+        extra = parts[1].strip() if len(parts) > 1 else ""
+
+        # --- /swarm status ---
+        if sub == "status":
+            console.print(
+                "[dim]No swarm execution in progress. "
+                "Use [cyan]/swarm <goal>[/cyan] to start one.[/dim]"
+            )
+            return "continue"
+
+        # --- /swarm plan <goal> ---
+        if sub == "plan":
+            if not extra:
+                console.print(
+                    "[yellow]Usage:[/] /swarm plan <goal>"
+                )
+                return "continue"
+
+            if state.completion_engine is None or state.registry is None:
+                console.print(
+                    "[red]Swarm requires initialized providers. "
+                    "Configure API keys first.[/red]"
+                )
+                return "continue"
+
+            swarm_config = SwarmConfig(
+                use_debate=True,
+                use_moa=True,
+                use_cascade=True,
+                use_tools=state.tool_registry is not None,
+            )
+            orchestrator = SwarmOrchestrator(
+                engine=state.completion_engine,
+                registry=state.registry,
+                config=swarm_config,
+                tool_registry=state.tool_registry,
+            )
+
+            console.print(
+                Panel(
+                    f"[bold cyan]Swarm Plan[/bold cyan]\n"
+                    f"[dim]{extra}[/dim]",
+                    title="Swarm Orchestrator",
+                    border_style="cyan",
+                )
+            )
+
+            with console.status("[bold cyan]Decomposing task..."):
+                plan = asyncio.get_event_loop().run_until_complete(
+                    orchestrator._phase_decompose(
+                        SwarmPlan(goal=extra),
+                        extra,
+                        {},
+                    )
+                )
+
+            with console.status("[bold cyan]Researching..."):
+                plan = asyncio.get_event_loop().run_until_complete(
+                    orchestrator._phase_research(plan, extra, {})
+                )
+
+            with console.status("[bold cyan]Planning..."):
+                plan = asyncio.get_event_loop().run_until_complete(
+                    orchestrator._phase_plan(plan, extra)
+                )
+
+            with console.status("[bold cyan]Reviewing plan..."):
+                plan = asyncio.get_event_loop().run_until_complete(
+                    orchestrator._phase_review(plan, extra)
+                )
+
+            # Display the plan as a Rich table
+            task_table = Table(
+                title="Decomposed Tasks",
+                show_header=True,
+                header_style="bold magenta",
+            )
+            task_table.add_column("#", style="dim", width=4)
+            task_table.add_column("Task", min_width=30)
+            task_table.add_column("Complexity", width=10)
+            task_table.add_column("Files", width=25)
+
+            for idx, task in enumerate(plan.tasks, 1):
+                files_str = ", ".join(task.files_changed[:3]) or "-"
+                task_table.add_row(
+                    str(idx),
+                    task.description[:80],
+                    task.complexity,
+                    files_str,
+                )
+            console.print(task_table)
+
+            if plan.plan_text:
+                console.print(
+                    Panel(
+                        Markdown(plan.plan_text[:3000]),
+                        title="Execution Plan",
+                        border_style="green",
+                    )
+                )
+
+            if plan.review_notes:
+                console.print(
+                    Panel(
+                        plan.review_notes[:2000],
+                        title="Review Notes",
+                        border_style="yellow",
+                    )
+                )
+
+            # Cost summary
+            cost_table = Table(title="Phase Costs", show_header=True)
+            cost_table.add_column("Phase", style="cyan")
+            cost_table.add_column("Cost (USD)", justify="right")
+            for phase_name, cost in plan.phase_costs.items():
+                cost_table.add_row(phase_name, f"${cost:.4f}")
+            cost_table.add_row(
+                "[bold]Total[/bold]",
+                f"[bold]${plan.total_cost:.4f}[/bold]",
+            )
+            console.print(cost_table)
+
+            console.print(
+                "[dim]Plan-only mode. Use "
+                "[cyan]/swarm " + extra[:50] + "[/cyan] "
+                "to execute.[/dim]"
+            )
+            return "continue"
+
+        # --- /swarm <goal> (default: full orchestration) ---
+        if not args.strip():
+            console.print(
+                "[yellow]Usage:[/] /swarm <goal>\n"
+                "[dim]Subcommands: plan, status[/dim]"
+            )
+            return "continue"
+
+        goal_raw = args.strip()
+
+        # Parse optional --budget flag: /swarm --budget 5.0 <goal>
+        budget_override: float | None = None
+        if goal_raw.startswith("--budget"):
+            parts = goal_raw.split(maxsplit=2)
+            if len(parts) >= 3:
+                try:
+                    budget_override = float(parts[1])
+                except ValueError:
+                    console.print(
+                        "[red]Invalid --budget value. "
+                        "Usage: /swarm --budget 5.0 <goal>[/red]"
+                    )
+                    return "continue"
+                goal_raw = parts[2]
+            else:
+                console.print(
+                    "[yellow]Usage:[/] /swarm --budget <usd> <goal>"
+                )
+                return "continue"
+
+        goal = goal_raw
+
+        if state.completion_engine is None or state.registry is None:
+            console.print(
+                "[red]Swarm requires initialized providers. "
+                "Configure API keys first.[/red]"
+            )
+            return "continue"
+
+        swarm_config = SwarmConfig(
+            use_debate=True,
+            use_moa=True,
+            use_cascade=True,
+            use_tools=state.tool_registry is not None,
+            total_budget=budget_override if budget_override is not None else 1.0,
+            auto_scale_budget=budget_override is None,
+        )
+        orchestrator = SwarmOrchestrator(
+            engine=state.completion_engine,
+            registry=state.registry,
+            config=swarm_config,
+            tool_registry=state.tool_registry,
+        )
+
+        console.print(
+            Panel(
+                f"[bold cyan]Swarm Orchestration[/bold cyan]\n"
+                f"[dim]{goal}[/dim]",
+                title="Swarm Orchestrator",
+                border_style="cyan",
+            )
+        )
+
+        with console.status("[bold cyan]Running swarm pipeline..."):
+            plan = asyncio.get_event_loop().run_until_complete(
+                orchestrator.orchestrate(goal)
+            )
+
+        # Display results: task table
+        result_table = Table(
+            title="Swarm Results",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        result_table.add_column("#", style="dim", width=4)
+        result_table.add_column("Task", min_width=30)
+        result_table.add_column("Model", width=20)
+        result_table.add_column("Status", width=12)
+        result_table.add_column("Cost", width=10, justify="right")
+
+        for idx, task in enumerate(plan.tasks, 1):
+            status_color = {
+                TaskStatus.COMPLETED: "green",
+                TaskStatus.FAILED: "red",
+                TaskStatus.RUNNING: "yellow",
+                TaskStatus.PENDING: "dim",
+            }.get(task.status, "white")
+            result_table.add_row(
+                str(idx),
+                task.description[:60],
+                task.assigned_model or "-",
+                f"[{status_color}]{task.status}[/{status_color}]",
+                f"${plan.phase_costs.get(SwarmPhase.EXECUTE, 0.0):.4f}",
+            )
+        console.print(result_table)
+
+        # Files changed summary
+        all_files: list[str] = []
+        for task in plan.tasks:
+            all_files.extend(task.files_changed)
+        if all_files:
+            unique_files = sorted(set(all_files))
+            console.print(
+                f"\n[bold]Files changed:[/bold] "
+                f"{', '.join(unique_files[:10])}"
+            )
+            if len(unique_files) > 10:
+                console.print(
+                    f"[dim]...and {len(unique_files) - 10} more[/dim]"
+                )
+
+        # Phase cost breakdown
+        cost_table = Table(title="Cost by Phase", show_header=True)
+        cost_table.add_column("Phase", style="cyan")
+        cost_table.add_column("Cost (USD)", justify="right")
+        for phase_name, cost in plan.phase_costs.items():
+            cost_table.add_row(phase_name, f"${cost:.4f}")
+        cost_table.add_row(
+            "[bold]Total[/bold]",
+            f"[bold]${plan.total_cost:.4f}[/bold]",
+        )
+        console.print(cost_table)
+
+        # Cross-review summary
+        if plan.cross_reviews:
+            console.print("\n[bold]Cross-Review Summary:[/bold]")
+            for review in plan.cross_reviews:
+                severity_color = {
+                    "info": "cyan",
+                    "warning": "yellow",
+                    "error": "red",
+                }.get(review.severity, "white")
+                console.print(
+                    f"  [{severity_color}]{review.severity}[/{severity_color}] "
+                    f"Task {review.task_id[:8]}... "
+                    f"({'approved' if review.approved else 'rejected'}): "
+                    f"{review.comments[:100]}"
+                )
+
+        # Advanced feature summaries
+        if plan.debate_result:
+            console.print(
+                f"\n[bold]Debate:[/bold] "
+                f"{len(plan.debate_result.rounds)} rounds, "
+                f"consensus {plan.debate_result.consensus_score:.0%}, "
+                f"{len(plan.debate_result.participating_models)} models"
+            )
+        if plan.cascade_results:
+            cascade_tasks = len(plan.cascade_results)
+            avg_level = sum(
+                r.accepted_at_level for r in plan.cascade_results.values()
+            ) / max(cascade_tasks, 1)
+            total_saved = sum(
+                r.cost_saved_vs_premium for r in plan.cascade_results.values()
+            )
+            console.print(
+                f"[bold]Cascade:[/bold] "
+                f"{cascade_tasks} tasks, avg level {avg_level:.1f}, "
+                f"saved ${total_saved:.4f} vs premium"
+            )
+        if plan.moa_results:
+            moa_tasks = len(plan.moa_results)
+            console.print(
+                f"[bold]MoA:[/bold] "
+                f"{moa_tasks} complex tasks used parallel generation + fusion"
+            )
+
+        completed = sum(
+            1 for t in plan.tasks if t.status == TaskStatus.COMPLETED
+        )
+        console.print(
+            f"\n[green]Swarm complete:[/green] "
+            f"{completed}/{len(plan.tasks)} tasks completed, "
+            f"total cost ${plan.total_cost:.4f}"
+        )
+
+    except ValueError as exc:
+        console.print(f"[yellow]{exc}[/]")
+    except Exception as exc:
+        logger.debug("swarm_error", error=str(exc))
+        console.print(f"[red]Swarm error:[/] {exc}")
+    return "continue"
+
+
+def _looks_like_swarm_task(prompt: str) -> bool:
+    """Heuristic: does this prompt describe a multi-step coding task?
+
+    Checks for the presence of action keywords (build, create, implement, etc.)
+    AND multi-step indicators (and, then, multiple, files, etc.).
+
+    Args:
+        prompt: The user's natural-language prompt.
+
+    Returns:
+        True if the prompt looks like it would benefit from swarm orchestration.
+    """
+    keywords = {"build", "create", "implement", "refactor", "add", "design", "develop"}
+    multi_indicators = {
+        "and", "then", "also", "multiple", "files",
+        "modules", "components", "system",
+    }
+    words = set(prompt.lower().split())
+    return bool(words & keywords) and bool(words & multi_indicators)
+
+
 # ======================================================================
 # Prompt processing (non-slash input)
 # ======================================================================
+
+def _pick_repl_model() -> str:
+    """Pick the best available model based on environment variables.
+
+    Priority order: paid frontier models first (best quality for tool use),
+    then reliable free-tier providers, then free aggregators.
+    """
+    import os
+
+    providers = [
+        # Paid frontier — best quality and tool-use support
+        ("ANTHROPIC_API_KEY", "anthropic/claude-sonnet-4-20250514"),
+        ("OPENAI_API_KEY", "gpt-4o-mini"),
+        # Reliable free-tier providers
+        ("MISTRAL_API_KEY", "mistral/mistral-small-latest"),
+        ("GROQ_API_KEY", "groq/llama-3.3-70b-versatile"),
+        ("DEEPSEEK_API_KEY", "deepseek/deepseek-chat"),
+        # Google — only if quota is available (many users hit limit:0)
+        ("GOOGLE_API_KEY", "gemini/gemini-2.0-flash"),
+        ("GEMINI_API_KEY", "gemini/gemini-2.0-flash"),
+        # Free aggregator — rate limits vary
+        ("OPENROUTER_API_KEY", "openrouter/meta-llama/llama-3.3-70b-instruct:free"),
+    ]
+    for env_var, model_id in providers:
+        if os.environ.get(env_var):
+            return model_id
+    return "groq/llama-3.3-70b-versatile"
+
+
+
+
+# ======================================================================
+# Agentic loop helpers
+# ======================================================================
+
+
+def _cleanup_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Clean up an event loop, cancelling pending tasks."""
+    try:
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(
+                asyncio.gather(*pending, return_exceptions=True)
+            )
+    except Exception:  # noqa: S110
+        pass  # Intentional — suppressing async cleanup noise
+    loop.close()
+
+
+def _maybe_escalate_model(
+    current_model: str,
+    state: _SessionState,
+) -> str | None:
+    """Check whether the current model should be escalated for tool-use.
+
+    When ``escalate_on_tool_use`` is enabled and the current model is a
+    lightweight / simple-tier model, this returns the cheapest available
+    model that supports tools and is at least MEDIUM tier.  Returns
+    ``None`` if no escalation is warranted.
+
+    Args:
+        current_model: The model currently selected for the request.
+        state: Session state (provides registry and settings).
+
+    Returns:
+        A better model id, or ``None`` if the current model is adequate.
+    """
+    from prism.providers.base import ComplexityTier
+
+    # Guard: need settings + registry
+    if state.settings is None or state.registry is None:
+        return None
+
+    escalate_flag = getattr(
+        state.settings.config.routing, "escalate_on_tool_use", True,
+    )
+    if not escalate_flag:
+        return None
+
+    # If the current model is already at MEDIUM or COMPLEX tier, skip
+    model_info = state.registry.get_model_info(current_model)
+    if model_info is not None and model_info.tier in (ComplexityTier.MEDIUM, ComplexityTier.COMPLEX):
+        return None
+
+    # Find cheapest tool-capable model at MEDIUM or above
+    all_models = state.registry.get_available_models()
+    tier_order = {"simple": 0, "medium": 1, "complex": 2}
+    candidates = [
+        m for m in all_models
+        if m.supports_tools
+        and tier_order.get(m.tier.value, 0) >= 1
+        and m.id != current_model
+    ]
+    if not candidates:
+        return None
+
+    # Already sorted cheapest-first by get_available_models
+    return candidates[0].id
+
+
+def _estimate_context_tokens(state: _SessionState) -> int:
+    """Estimate tokens in the current conversation context."""
+    from prism.context.manager import estimate_tokens
+
+    total = 0
+    for msg in state.conversation:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += estimate_tokens(content)
+    return total
+
+
+def _load_project_instructions() -> str:
+    """Load project instructions from .prism.md, CLAUDE.md, or .claude.md.
+
+    Checks the current working directory for project instruction files
+    in priority order. Returns the contents of the first file found,
+    capped at 4000 characters, or an empty string if none exist.
+
+    Returns:
+        The project instructions text, or empty string.
+    """
+    from pathlib import Path
+
+    instruction_files = (".prism.md", "CLAUDE.md", ".claude.md")
+    for name in instruction_files:
+        path = Path.cwd() / name
+        if path.is_file():
+            try:
+                content = path.read_text(encoding="utf-8")[:4000]
+                logger.debug(
+                    "project_instructions_loaded",
+                    file=name,
+                    length=len(content),
+                )
+                return content
+            except (OSError, UnicodeDecodeError):
+                logger.debug(
+                    "project_instructions_read_failed", file=name,
+                )
+                continue
+    return ""
+
+
+def _build_system_prompt() -> dict[str, Any]:
+    """Build the system prompt with project context and self-correction rules."""
+    from pathlib import Path as _Path
+    cwd = str(_Path.cwd())
+
+    content = (
+        "You are Prism, an intelligent coding assistant in a terminal REPL. "
+        f"Project directory: {cwd}\n\n"
+        "## How to respond\n"
+        "- Be **conversational**. Talk like a helpful colleague, not a textbook.\n"
+        "- Keep responses **short and focused**. 3-8 lines for simple questions. "
+        "Never dump a wall of text.\n"
+        "- **Ask clarifying questions** when the request is ambiguous. "
+        "Don't guess — ask what they mean.\n"
+        "- When a task has multiple approaches, briefly describe 2-3 options "
+        "and ask which they prefer.\n"
+        "- For big tasks, outline your plan in 3-5 bullet points and ask "
+        "\"Want me to go ahead?\" before executing.\n"
+        "- Use markdown formatting: **bold** for emphasis, `code` for "
+        "identifiers, ```blocks``` for code.\n"
+        "- Show small code snippets inline. For large changes, describe "
+        "what you'll do and use tools.\n\n"
+        "## When to use tools\n"
+        "- Only use tools when the user asks you to read, write, edit, "
+        "search files, or run commands.\n"
+        "- For greetings, questions, explanations — just reply with text.\n"
+        "- Before editing, read the file first. After editing, confirm what "
+        "you changed.\n"
+        "- If a tool fails, try to fix it (max 3 retries).\n"
+    )
+
+    # --- Repository map (codebase structure) ---
+    try:
+        from prism.context.repo_map import generate_repo_map
+        repo_map = generate_repo_map(_Path.cwd(), max_tokens=3000)
+        if repo_map:
+            content += (
+                "\n\n## Repository Map\n"
+                "Below is a compressed view of the codebase structure "
+                "(classes, functions, signatures). Use this to understand "
+                "the project before making changes.\n\n"
+                f"{repo_map}"
+            )
+    except Exception:
+        logger.debug("repo_map_generation_failed")
+
+    # --- Project memory (persistent facts from PRISM_MEMORY.md) ---
+    try:
+        from prism.context.memory import ProjectMemory
+        memory = ProjectMemory(_Path.cwd())
+        memory_block = memory.get_context_block()
+        if memory_block:
+            content += f"\n\n{memory_block}"
+    except Exception:
+        logger.debug("project_memory_injection_failed")
+
+    # --- Project instructions (.prism.md / CLAUDE.md / .claude.md) ---
+    project_instructions = _load_project_instructions()
+    if project_instructions:
+        content += (
+            "\n\n## Project Instructions\n"
+            f"{project_instructions}"
+        )
+
+    return {"role": "system", "content": content}
+
+
+def _show_tool_action(
+    tool_name: str,
+    arguments: dict[str, Any],
+    console: Any,
+) -> None:
+    """Show a dim status line for the tool being used."""
+    if tool_name == "read_file":
+        console.print(f"  [dim]Reading {arguments.get('path', '?')}[/dim]")
+    elif tool_name == "list_directory":
+        console.print(
+            f"  [dim]Listing {arguments.get('path', '.')}[/dim]"
+        )
+    elif tool_name == "search_codebase":
+        console.print(
+            f"  [dim]Searching: {arguments.get('pattern', '?')}[/dim]"
+        )
+    elif tool_name == "write_file":
+        path = arguments.get("path", "?")
+        size = len(arguments.get("content", ""))
+        console.print(f"  [dim]Writing {path} ({size} chars)[/dim]")
+    elif tool_name == "edit_file":
+        console.print(
+            f"  [dim]Editing {arguments.get('path', '?')}[/dim]"
+        )
+    elif tool_name == "execute_command":
+        cmd = arguments.get("command", "?")
+        console.print(f"  [dim]$ {cmd[:100]}[/dim]")
+    elif tool_name == "browse_web":
+        console.print(
+            f"  [dim]Browsing {arguments.get('url', '?')}[/dim]"
+        )
+    else:
+        console.print(f"  [dim]{tool_name}[/dim]")
+
+
+def _ask_permission(
+    tool_name: str,
+    arguments: dict[str, Any],
+    level: str,
+    console: Any,
+) -> str:
+    """Ask user for permission before executing a tool.
+
+    Returns:
+        ``"deny"`` if the user declined, ``"once"`` for a one-time approval,
+        or ``"always"`` to approve this tool for the rest of the session.
+        DANGEROUS tools never offer the "always" option.
+    """
+    if level == "DANGEROUS":
+        console.print(f"  [red bold]DANGEROUS:[/] {tool_name}")
+    else:
+        console.print(f"  [yellow]Confirm:[/] {tool_name}")
+
+    if tool_name == "write_file":
+        path = arguments.get("path", "?")
+        size = len(arguments.get("content", ""))
+        console.print(f"    Write {size} chars to {path}")
+    elif tool_name == "edit_file":
+        console.print(f"    Edit {arguments.get('path', '?')}")
+    elif tool_name == "execute_command":
+        console.print(f"    $ {arguments.get('command', '?')}")
+
+    try:
+        if level == "DANGEROUS":
+            response = input("  Allow? [y/N] ").strip().lower()
+            if response in ("y", "yes"):
+                return "once"
+            return "deny"
+        # CONFIRM tools offer the "always" option
+        response = input("  Allow? [y/N/a(lways)] ").strip().lower()
+        if response in ("a", "always"):
+            return "always"
+        if response in ("y", "yes"):
+            return "once"
+        return "deny"
+    except (EOFError, KeyboardInterrupt):
+        return "deny"
+
+
+def _format_tool_error(
+    tool_name: str,
+    error_message: str,
+    arguments: dict[str, Any] | None = None,
+) -> str:
+    """Format a tool error with actionable context for self-correction.
+
+    Delegates to :func:`prism.cli.error_recovery.format_tool_error` which
+    classifies the error, selects a recovery strategy, and builds a
+    structured prompt for the LLM.
+
+    Args:
+        tool_name: Name of the tool that failed.
+        error_message: The raw error string.
+        arguments: The arguments that were passed to the tool (optional).
+
+    Returns:
+        A formatted error string with self-correction hints.
+    """
+    from prism.cli.error_recovery import format_tool_error
+
+    return format_tool_error(
+        tool_name, error_message, arguments=arguments,
+    )
+
+
+def _should_auto_approve(tool_name: str, state: _SessionState) -> bool:
+    """Check whether a CONFIRM-level tool can be auto-approved.
+
+    A tool is auto-approved when:
+    - It was previously approved with "always" for this session, or
+    - The user passed ``--yes`` (``settings.config.tools.auto_approve``).
+
+    DANGEROUS tools must never be auto-approved through this path.
+
+    Args:
+        tool_name: Name of the tool to check.
+        state: Current session state.
+
+    Returns:
+        True if the tool should be auto-approved.
+    """
+    if tool_name in state.permission_cache:
+        return True
+    return bool(state.settings and state.settings.config.tools.auto_approve)
+
+
+def _execute_tool_with_permission(
+    tool_name: str,
+    arguments: dict[str, Any],
+    tool_registry: Any,
+    console: Any,
+    hook_manager: Any | None = None,
+    mcp_client: Any | None = None,
+    audit_logger: Any | None = None,
+    state: Any | None = None,
+) -> str:
+    """Execute a tool with permission checking and self-correction context.
+
+    When a tool fails, the error is formatted with actionable hints so
+    the LLM can automatically retry with a corrected approach.
+
+    Supports pre/post hooks via ``hook_manager`` and MCP tools via
+    ``mcp_client`` (tools prefixed with ``mcp_`` are routed to MCP).
+    """
+    from prism.tools.base import PermissionLevel
+
+    # --- MCP tool routing ---
+    if mcp_client and tool_name.startswith("mcp_"):
+        _show_tool_action(tool_name, arguments, console)
+        try:
+            mcp_result = mcp_client.handle_mcp_tool_call(
+                tool_name, arguments,
+            )
+            output = str(mcp_result)
+            if len(output) > 8000:
+                output = output[:8000] + "\n... (truncated)"
+            return output
+        except Exception as exc:
+            return _format_tool_error(
+                tool_name, str(exc), arguments,
+            )
+
+    try:
+        tool = tool_registry.get_tool(tool_name)
+    except Exception:
+        return _format_tool_error(
+            tool_name,
+            f"Unknown tool '{tool_name}'. Available tools can be "
+            "listed with the tool registry.",
+        )
+
+    # Determine effective permission level
+    perm = tool.permission_level
+
+    # Show what we're about to do
+    _show_tool_action(tool_name, arguments, console)
+
+    # --- Diff preview for write/edit tools ---
+    if tool_name in ("write_file", "edit_file"):
+        try:
+            if tool_name == "write_file":
+                diff_text, _is_new = tool.generate_preview_diff(arguments)
+            else:
+                diff_text = tool.generate_preview_diff(arguments)
+            if diff_text:
+                from prism.cli.ui.display import display_diff
+
+                display_diff(diff_text, arguments.get("path", ""), console)
+        except Exception:
+            logger.debug("diff_preview_failed", tool=tool_name)
+
+    # --- Pre-hooks ---
+    if hook_manager:
+        try:
+            pre_results = hook_manager.run_pre_hooks(tool_name, arguments)
+            for hr in pre_results:
+                if hr.blocked:
+                    console.print(
+                        f"  [yellow]Blocked by hook:[/] {hr.output}"
+                    )
+                    return f"Blocked by pre-hook: {hr.output}"
+        except Exception:
+            logger.debug("pre_hook_error", tool=tool_name)
+
+    # Permission gate for writes and commands
+    if perm in (PermissionLevel.CONFIRM, PermissionLevel.DANGEROUS):
+        # Check permission overrides in priority order
+        skip = False
+
+        # 1. --dangerously-skip-permissions → skip everything
+        if state is not None and state.skip_all_permissions:
+            skip = True
+
+        # 2. Auto-approve for CONFIRM tools only (not DANGEROUS)
+        if (
+            not skip
+            and perm == PermissionLevel.CONFIRM
+            and state is not None
+            and _should_auto_approve(tool_name, state)
+        ):
+            console.print(
+                f"  [dim]Auto-approved: {tool_name}[/dim]"
+            )
+            skip = True
+
+        if not skip:
+            label = (
+                "DANGEROUS"
+                if perm == PermissionLevel.DANGEROUS
+                else "confirm"
+            )
+            decision = _ask_permission(
+                tool_name, arguments, label, console,
+            )
+            if decision == "deny":
+                return f"Permission denied by user for {tool_name}"
+            if (
+                decision == "always"
+                and state is not None
+            ):
+                state.permission_cache.add(tool_name)
+
+    # Execute the tool
+    try:
+        result = tool.execute(arguments)
+        result_output = result.output if result.success else (result.error or "")
+
+        # --- Post-hooks ---
+        if hook_manager:
+            try:
+                hook_manager.run_post_hooks(tool_name, result_output)
+            except Exception:
+                logger.debug("post_hook_error", tool=tool_name)
+
+        # --- Audit log ---
+        if audit_logger:
+            try:
+                audit_logger.log_tool_execution(
+                    tool_name=tool_name,
+                    args=arguments,
+                    success=result.success,
+                    error=result.error if not result.success else None,
+                )
+            except Exception:
+                logger.debug("audit_log_error", tool=tool_name)
+
+        if result.success:
+            # --- Auto-commit after file writes/edits ---
+            if (
+                state is not None
+                and state.auto_committer
+                and tool_name in ("write_file", "edit_file")
+            ):
+                try:
+                    file_path = arguments.get("path", "")
+                    state.auto_committer.auto_commit_edit(
+                        file_path=file_path,
+                        description=f"{tool_name} via REPL",
+                    )
+                except Exception:
+                    logger.debug("auto_commit_failed", tool=tool_name)
+
+            output = result.output
+            if len(output) > 8000:
+                output = output[:8000] + "\n... (truncated)"
+            return output
+        return _format_tool_error(
+            tool_name, result.error or "Unknown error",
+            arguments,
+        )
+    except Exception as exc:
+        return _format_tool_error(
+            tool_name, str(exc), arguments,
+        )
+
+
+def _clean_error_message(err_msg: str) -> str:
+    """Strip LiteLLM/provider noise from error messages for clean display."""
+    for prefix in (
+        "GroqException - ", "OpenrouterException - ",
+        "DeepseekException - ", "geminiException - ",
+        "MistralException - ", "AnthropicException - ",
+        "OpenAIException - ",
+    ):
+        if prefix in err_msg:
+            err_msg = err_msg.split(prefix, 1)[-1]
+            break
+    if "Cannot connect to host" in err_msg or "nodename nor servname" in err_msg:
+        return "Network error — check your internet connection."
+    if "Invalid API Key" in err_msg or "invalid_api_key" in err_msg:
+        return "Invalid API key. Run: prism auth status"
+    if "Insufficient Balance" in err_msg:
+        return "API credits exhausted for this provider."
+    if "rate-limited" in err_msg.lower() or "429" in err_msg:
+        return "Rate limited — try again in a moment."
+    if "Quota exceeded" in err_msg or "quota" in err_msg.lower():
+        return "API quota exceeded. Check your provider dashboard."
+    # Truncate very long errors
+    if len(err_msg) > 200:
+        err_msg = err_msg[:200] + "..."
+    return err_msg
+
+
+def _save_session(state: _SessionState) -> None:
+    """Persist current conversation to session file."""
+    if state.session_manager is None:
+        return
+    try:
+        state.session_manager.save_session(
+            state.session_id,
+            {
+                "session_id": state.session_id,
+                "messages": state.conversation,
+                "active_files": state.active_files,
+                "pinned_model": state.pinned_model,
+            },
+        )
+    except Exception:
+        logger.debug("session_save_failed", session_id=state.session_id)
+
+
+def _run_completion(
+    engine: Any,
+    messages: list[dict[str, Any]],
+    model: str,
+    tool_schemas: list[dict[str, Any]] | None,
+    session_id: str,
+    tier_value: str,
+    console: Any | None = None,
+) -> Any:
+    """Run async completion in a new event loop with a progress spinner."""
+    from rich.live import Live
+    from rich.spinner import Spinner
+
+    async def _do_complete() -> Any:
+        return await engine.complete(
+            messages=messages,
+            model=model,
+            temperature=0.3,
+            max_tokens=4096,
+            tools=tool_schemas,
+            session_id=session_id,
+            complexity_tier=tier_value,
+        )
+
+    loop = asyncio.new_event_loop()
+    try:
+        if console is not None:
+            spinner = Spinner("dots", text="[dim]Thinking...[/dim]")
+            with Live(spinner, console=console, refresh_per_second=10, transient=True):
+                return loop.run_until_complete(_do_complete())
+        return loop.run_until_complete(_do_complete())
+    finally:
+        _cleanup_event_loop(loop)
+
+
+def _run_completion_streaming(
+    engine: Any,
+    messages: list[dict[str, Any]],
+    model: str,
+    session_id: str,
+    tier_value: str,
+    console: Any,
+    tool_schemas: list[dict[str, Any]] | None = None,
+) -> Any:
+    """Run streaming completion, displaying tokens as they arrive.
+
+    Shows a "Thinking..." spinner while waiting for the first token,
+    then switches to Rich Live Markdown rendering for a typing effect.
+    Supports tool_calls in streaming responses when tool_schemas are provided.
+
+    Args:
+        engine: The :class:`CompletionEngine` instance.
+        messages: Chat messages in OpenAI format.
+        model: LiteLLM model identifier.
+        session_id: Current session id for cost tracking.
+        tier_value: Complexity tier label.
+        console: Rich console for fallback rendering.
+        tool_schemas: Optional tool schemas to send with the request.
+
+    Returns:
+        A :class:`CompletionResult` with the full response.
+    """
+    from prism.cli.stream_handler import StreamHandler
+
+    handler = StreamHandler(console)
+    handler.show_thinking()
+
+    extra_kwargs: dict[str, Any] = {}
+    if tool_schemas:
+        extra_kwargs["tools"] = tool_schemas
+
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(
+            engine.complete_streaming(
+                messages=messages,
+                model=model,
+                on_token=handler.on_token,
+                session_id=session_id,
+                complexity_tier=tier_value,
+                **extra_kwargs,
+            )
+        )
+        handler.finalize()
+        return result
+    except Exception:
+        # If streaming fails, clean up the handler output and fall back
+        handler.finalize()
+        raise
+    finally:
+        _cleanup_event_loop(loop)
+
+
+def _run_completion_with_fallback(
+    engine: Any,
+    messages: list[dict[str, Any]],
+    models: list[str],
+    session_id: str,
+    tier_value: str,
+) -> Any:
+    """Run async completion with fallback in a new event loop."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(
+            engine.complete_with_fallback(
+                messages=messages,
+                models=models,
+                temperature=0.3,
+                max_tokens=4096,
+                session_id=session_id,
+                complexity_tier=tier_value,
+            )
+        )
+    finally:
+        _cleanup_event_loop(loop)
+
+
+# ======================================================================
+# Main prompt processor — the agentic core
+# ======================================================================
+
+
+# Token threshold for auto-compaction (roughly 60k tokens ≈ 240k chars)
+_AUTO_COMPACT_CHAR_THRESHOLD = 200_000
+_AUTO_COMPACT_MAX_TOKENS = 8000
+
+
+def _auto_compact_conversation(
+    state: _SessionState,
+    console: Any,
+) -> None:
+    """Auto-compact conversation when it exceeds the token threshold.
+
+    Replaces older messages with a summary, keeping the most recent
+    exchanges intact so the LLM retains working context.
+    """
+    total_chars = sum(
+        len(str(msg.get("content", ""))) for msg in state.conversation
+    )
+    if total_chars < _AUTO_COMPACT_CHAR_THRESHOLD:
+        return
+
+    try:
+        from prism.context.summarizer import summarize
+
+        # Only summarize user/assistant messages (not tool messages)
+        chat_msgs = [
+            m for m in state.conversation
+            if m.get("role") in ("user", "assistant")
+        ]
+        if len(chat_msgs) <= 8:
+            return  # Too few to compact
+
+        summary_text = summarize(
+            chat_msgs,
+            max_tokens=_AUTO_COMPACT_MAX_TOKENS,
+            keep_recent=6,
+        )
+
+        # Replace conversation with compacted version
+        # Keep tool-result messages from last 6 exchanges
+        recent_msgs = state.conversation[-12:]
+        state.conversation = [
+            {"role": "system", "content": f"[Compacted context]\n{summary_text}"},
+            *recent_msgs,
+        ]
+
+        console.print("[dim]Context auto-compacted.[/dim]")
+        logger.debug(
+            "auto_compact",
+            original_chars=total_chars,
+            new_messages=len(state.conversation),
+        )
+    except Exception:
+        logger.debug("auto_compact_failed")
+
+
+def _execute_tools_parallel(
+    tool_calls: list[dict[str, Any]],
+    state: _SessionState,
+    console: Any,
+) -> list[tuple[str, str]]:
+    """Execute tool calls, using parallelism for read-only tools.
+
+    Read-only tools (read_file, list_directory, search_codebase) run
+    in parallel via ThreadPoolExecutor.  Write tools and commands run
+    sequentially to preserve ordering and allow permission prompts.
+
+    Args:
+        tool_calls: List of tool call dicts from the LLM response.
+        state: Current session state.
+        console: Rich console for output.
+
+    Returns:
+        List of (tool_call_id, output) tuples in the original order.
+    """
+    import json as _json
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Read-only tools that are safe to parallelize
+    parallel_safe = frozenset({
+        "read_file", "list_directory", "search_codebase",
+    })
+
+    # Parse all tool calls first
+    parsed: list[tuple[str, str, dict[str, Any]]] = []
+    for tc in tool_calls:
+        tc_id = tc.get("id", "")
+        fn = tc.get("function", {})
+        tool_name = fn.get("name", "")
+        try:
+            args = _json.loads(fn.get("arguments", "{}"))
+        except _json.JSONDecodeError:
+            args = {}
+        parsed.append((tc_id, tool_name, args))
+
+    # If only 1 tool call, skip parallelism overhead
+    if len(parsed) <= 1:
+        results: list[tuple[str, str]] = []
+        for tc_id, tool_name, args in parsed:
+            output = _execute_tool_with_permission(
+                tool_name=tool_name,
+                arguments=args,
+                tool_registry=state.tool_registry,
+                console=console,
+                hook_manager=state.hook_manager,
+                mcp_client=state.mcp_client,
+                audit_logger=state.audit_logger,
+                state=state,
+            )
+            results.append((tc_id, output))
+        return results
+
+    # Split into parallel-safe and sequential groups
+    parallel_batch: list[tuple[int, str, str, dict[str, Any]]] = []
+    sequential_batch: list[tuple[int, str, str, dict[str, Any]]] = []
+
+    for idx, (tc_id, tool_name, args) in enumerate(parsed):
+        if tool_name in parallel_safe:
+            parallel_batch.append((idx, tc_id, tool_name, args))
+        else:
+            sequential_batch.append((idx, tc_id, tool_name, args))
+
+    # Results indexed by original position
+    results_by_idx: dict[int, tuple[str, str]] = {}
+
+    # Execute read-only tools in parallel
+    if parallel_batch:
+        def _run_tool(item: tuple[int, str, str, dict[str, Any]]) -> tuple[int, str, str]:
+            idx, tc_id, tool_name, args = item
+            output = _execute_tool_with_permission(
+                tool_name=tool_name,
+                arguments=args,
+                tool_registry=state.tool_registry,
+                console=console,
+                hook_manager=state.hook_manager,
+                mcp_client=state.mcp_client,
+                audit_logger=state.audit_logger,
+                state=state,
+            )
+            return idx, tc_id, output
+
+        with ThreadPoolExecutor(max_workers=min(len(parallel_batch), 4)) as pool:
+            futures = {pool.submit(_run_tool, item): item for item in parallel_batch}
+            for future in as_completed(futures):
+                try:
+                    idx, tc_id, output = future.result()
+                    results_by_idx[idx] = (tc_id, output)
+                except Exception as exc:
+                    item = futures[future]
+                    results_by_idx[item[0]] = (item[1], f"Error: {exc}")
+
+    # Execute write/command tools sequentially
+    for idx, tc_id, tool_name, args in sequential_batch:
+        output = _execute_tool_with_permission(
+            tool_name=tool_name,
+            arguments=args,
+            tool_registry=state.tool_registry,
+            console=console,
+            hook_manager=state.hook_manager,
+            mcp_client=state.mcp_client,
+            audit_logger=state.audit_logger,
+            state=state,
+        )
+        results_by_idx[idx] = (tc_id, output)
+
+    # Return in original order
+    return [results_by_idx[i] for i in range(len(parsed))]
+
 
 def _process_prompt(
     prompt: str,
@@ -4745,82 +6413,423 @@ def _process_prompt(
     dry_run: bool,
     offline: bool,
 ) -> None:
-    """Process a user prompt through the routing engine.
+    """Process a user prompt through the full routing + agentic loop.
 
-    Args:
-        prompt: User's input text.
-        console: Rich console for output.
-        settings: App settings.
-        state: Mutable session state.
-        dry_run: Show routing without executing.
-        offline: Only use local models.
+    Flow:
+    1. Classify task complexity (simple/medium/complex)
+    2. Select best model for that tier + fallback chain
+    3. Send to LLM with tool definitions
+    4. If LLM wants tools → execute (with permission) → loop
+    5. Display final text response
+    6. Track cost, record outcome, persist session
     """
-    from prism.router.classifier import TaskClassifier, TaskContext
-
-    classifier = TaskClassifier(settings)
-    context = TaskContext(active_files=state.active_files)
-    result = classifier.classify(prompt, context)
-
-    tier_colors = {
-        "simple": "green",
-        "medium": "yellow",
-        "complex": "red",
-    }
-    color = tier_colors.get(result.tier.value, "white")
-    console.print(
-        f"\n[dim]Tier:[/] [{color}]{result.tier.value.upper()}"
-        f"[/{color}] "
-        f"[dim](score: {result.score:.2f})[/dim]"
-    )
-
+    # --- Dry run mode ---
     if dry_run:
+        from prism.router.classifier import TaskClassifier, TaskContext
+
+        classifier = state.classifier or TaskClassifier(settings)
+        ctx = TaskContext(active_files=state.active_files)
+        result = classifier.classify(prompt, ctx)
+        tier_colors = {
+            "simple": "green", "medium": "yellow", "complex": "red",
+        }
+        color = tier_colors.get(result.tier.value, "white")
+        console.print(
+            f"\n[dim]Tier:[/] [{color}]{result.tier.value.upper()}"
+            f"[/{color}] [dim](score: {result.score:.2f})[/dim]"
+        )
         console.print(f"[dim]Features:[/] {result.features}")
         console.print(f"[dim]Reasoning:[/] {result.reasoning}")
-        console.print(
-            "[yellow]Dry-run mode — no API call made.[/]\n"
-        )
+        console.print("[yellow]Dry-run mode — no API call made.[/]\n")
         return
 
-    state.conversation.append(
-        {"role": "user", "content": prompt}
-    )
+    # --- Fallback to legacy mode if modules didn't initialize ---
+    if state.completion_engine is None:
+        _process_prompt_legacy(prompt, console, settings, state)
+        return
 
-    # Attempt completion through the engine
+    import warnings
+    warnings.filterwarnings("ignore", message=".*Task was destroyed.*")
+
+    state.conversation.append({"role": "user", "content": prompt})
+
+    # --- Auto-compaction: summarize if conversation is too long ---
+    _auto_compact_conversation(state, console)
+
+    # --- Step 1: Classify task complexity ---
+    from prism.router.classifier import TaskContext
+
+    tier = None
+    if state.classifier:
+        task_ctx = TaskContext(
+            active_files=state.active_files,
+            conversation_turns=len(state.conversation) // 2,
+        )
+        classification = state.classifier.classify(prompt, task_ctx)
+        tier = classification.tier
+
+    # --- Step 2: Select model + fallback chain ---
+    chosen_model = state.pinned_model or _pick_repl_model()
+    fallback_models: list[str] = []
+
+    # Determine if tools could be invoked (quality floor check)
+    tools_could_be_used = state.tool_registry is not None
+
+    if state.selector and tier:
+        try:
+            selection = state.selector.select(
+                tier=tier,
+                prompt=prompt,
+                context_tokens=_estimate_context_tokens(state),
+                tools_enabled=tools_could_be_used,
+            )
+            chosen_model = selection.model_id
+            fallback_models = list(selection.fallback_chain)
+        except Exception as sel_exc:
+            logger.debug("selector_fallback", error=str(sel_exc))
+            # Keep the default from _pick_repl_model()
+
+    # --- Step 2a: Privacy mode enforcement (local-only routing) ---
+    if state.privacy_manager and state.privacy_manager.is_private:
+        _is_ollama = (
+            chosen_model.startswith("ollama/")
+            or chosen_model.startswith("ollama_chat/")
+        )
+        if not _is_ollama:
+            recommended = state.privacy_manager.get_recommended_model()
+            console.print(
+                f"[yellow]Privacy mode:[/] Overriding "
+                f"[dim]{chosen_model}[/dim] -> "
+                f"[cyan]ollama/{recommended}[/cyan]"
+            )
+            chosen_model = f"ollama/{recommended}"
+            fallback_models = []
+
+    # --- Step 2b: Offline mode fallback (local-only routing) ---
+    _force_offline = offline
+    if not _force_offline and state.offline_manager:
+        _force_offline = state.offline_manager.is_offline
+    if _force_offline:
+        _is_ollama = (
+            chosen_model.startswith("ollama/")
+            or chosen_model.startswith("ollama_chat/")
+        )
+        if not _is_ollama:
+            _ollama_fallback = "llama3.1:8b"
+            if state.privacy_manager:
+                _ollama_fallback = state.privacy_manager.get_recommended_model()
+            console.print(
+                f"[yellow]Offline mode:[/] Overriding "
+                f"[dim]{chosen_model}[/dim] -> "
+                f"[cyan]ollama/{_ollama_fallback}[/cyan]"
+            )
+            chosen_model = f"ollama/{_ollama_fallback}"
+            fallback_models = []
+
+    # Routing info — only show in verbose/debug mode
+    tier_str = tier.value if tier else "?"
+    logger.debug("routing_decision", model=chosen_model, tier=tier_str)
+
+    # --- Swarm suggestion for complex multi-step tasks ---
+    if tier and tier.value == "complex" and _looks_like_swarm_task(prompt):
+        console.print(
+            "[dim]Tip: This looks like a multi-step task. "
+            "Try [cyan]/swarm " + prompt[:50] + "...[/cyan] for "
+            "multi-model collaboration.[/dim]"
+        )
+
+    # --- Step 2.5: Enhance prompt ---
+    enhanced_prompt = prompt
+    if state.prompt_enhancer:
+        try:
+            result = state.prompt_enhancer.enhance(prompt)
+            enhanced_prompt = result.enhanced_prompt
+        except Exception:
+            logger.debug("prompt_enhance_failed")
+
+    # --- Step 3: Build tool schemas ---
+    tool_schemas: list[dict[str, Any]] | None = None
+    if state.tool_registry:
+        try:
+            raw_schemas = state.tool_registry.all_schemas()
+            tool_schemas = [
+                {"type": "function", "function": schema}
+                for schema in raw_schemas
+            ]
+        except Exception:
+            logger.debug("tool_schema_build_failed")
+
+    # Add MCP tool schemas
+    if state.mcp_client:
+        try:
+            mcp_schemas = state.mcp_client.get_tool_schemas()
+            if mcp_schemas:
+                if tool_schemas is None:
+                    tool_schemas = []
+                tool_schemas.extend(mcp_schemas)
+        except Exception:
+            logger.debug("mcp_schema_build_failed")
+
+    # Check if model supports tools
+    if state.registry:
+        model_info = state.registry.get_model_info(chosen_model)
+        if model_info and not model_info.supports_tools:
+            tool_schemas = None
+
+    # --- Step 4: Build messages ---
+    system_msg = _build_system_prompt()
+    messages: list[dict[str, Any]] = [
+        system_msg, *list(state.conversation),
+    ]
+    # Replace last user message with enhanced prompt if different
+    if enhanced_prompt != prompt and messages:
+        messages[-1] = {"role": "user", "content": enhanced_prompt}
+
+    # --- Step 4.5: Rate limiter check ---
+    if state.rate_limiter:
+        provider_name = chosen_model.split("/")[0] if "/" in chosen_model else "openai"
+        if state.rate_limiter.is_rate_limited(provider_name):
+            wait_secs = state.rate_limiter.get_wait_time(provider_name)
+            console.print(
+                f"[yellow]Rate limited[/] for {provider_name} — "
+                f"retry in {wait_secs:.1f}s"
+            )
+            return
+
+    # --- Step 5: Agentic loop ---
+    max_iterations = 15
+    total_cost = 0.0
+    did_stream = False
+
     try:
-        from prism.llm.completion import CompletionEngine
+        for _iteration in range(max_iterations):
+            if _iteration == 0:
+                # --- First iteration: stream with tools for typing effect ---
+                try:
+                    result = _run_completion_streaming(
+                        engine=state.completion_engine,
+                        messages=messages,
+                        model=chosen_model,
+                        session_id=state.session_id,
+                        tier_value=tier_str,
+                        console=console,
+                        tool_schemas=tool_schemas,
+                    )
+                    did_stream = True
+                except Exception:
+                    logger.debug("streaming_fallback_to_regular")
+                    # Fall back to non-streaming with tools
+                    result = _run_completion(
+                        engine=state.completion_engine,
+                        messages=messages,
+                        model=chosen_model,
+                        tool_schemas=tool_schemas,
+                        session_id=state.session_id,
+                        tier_value=tier_str,
+                        console=console,
+                    )
+                    did_stream = False
+            else:
+                # --- Subsequent iterations: non-streaming with tools ---
+                result = _run_completion(
+                    engine=state.completion_engine,
+                    messages=messages,
+                    model=chosen_model,
+                    tool_schemas=tool_schemas,
+                    session_id=state.session_id,
+                    tier_value=tier_str,
+                    console=console,
+                )
+                did_stream = False
 
-        engine = CompletionEngine(settings=settings)
-        messages = list(state.conversation)
+            total_cost += result.cost_usd
 
-        completion = asyncio.get_event_loop().run_until_complete(
-            engine.complete(
-                messages=messages,
-                model=state.pinned_model or "",
-            )
-        )
+            # Record request for rate limiting
+            if state.rate_limiter:
+                state.rate_limiter.record_request(provider_name)
 
-        content = getattr(completion, "content", "")
-        if content:
-            state.conversation.append(
-                {"role": "assistant", "content": content}
-            )
-            console.print(Panel(
-                Markdown(content),
-                border_style="blue",
-            ))
+            # --- Tool calls? Execute them (parallel when possible) ---
+            if result.tool_calls:
+                # --- Smart escalation on first tool-use detection ---
+                if _iteration == 0 and not state.pinned_model:
+                    escalated = _maybe_escalate_model(
+                        current_model=chosen_model, state=state,
+                    )
+                    if escalated and escalated != chosen_model:
+                        console.print(
+                            f"[dim]Escalating: {chosen_model} -> "
+                            f"{escalated} (tool-use detected)[/dim]"
+                        )
+                        chosen_model = escalated
 
-        cost = getattr(completion, "cost_usd", 0.0)
-        tokens_in = getattr(completion, "input_tokens", 0)
-        tokens_out = getattr(completion, "output_tokens", 0)
-        model_used = getattr(completion, "model", "unknown")
+                assistant_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": result.content or None,
+                    "tool_calls": result.tool_calls,
+                }
+                messages.append(assistant_msg)
 
-        console.print(
-            f"[dim]{model_used} | "
-            f"{tokens_in}+{tokens_out} tokens | "
-            f"${cost:.4f}[/dim]\n"
-        )
+                tool_results = _execute_tools_parallel(
+                    tool_calls=result.tool_calls,
+                    state=state,
+                    console=console,
+                )
+
+                for tc_id, tool_output in tool_results:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": tool_output,
+                    })
+
+                continue  # Loop back for model to process results
+
+            # --- Final text response ---
+            content = result.content or ""
+            if content:
+                state.conversation.append(
+                    {"role": "assistant", "content": content}
+                )
+                # If we already streamed the content, skip Rich
+                # markdown rendering (the user saw it live).
+                if not did_stream:
+                    console.print()
+                    console.print(Markdown(content))
+                    console.print()
+                else:
+                    # Streamed output already printed; just add
+                    # trailing spacing for visual consistency.
+                    console.print()
+
+            # Show cost (only if non-zero)
+            if total_cost > 0.001:
+                console.print(f"[dim]${total_cost:.4f}[/dim]")
+
+            # Record outcome for adaptive learning
+            if state.learner and tier:
+                state.learner.record_outcome(
+                    model=chosen_model,
+                    tier=tier,
+                    outcome="accepted",
+                    cost=total_cost,
+                )
+
+            # Persist session
+            _save_session(state)
+            break
+
     except Exception as exc:
-        logger.debug("completion_error", error=str(exc))
-        console.print(
-            f"[red]Completion error:[/] {exc}\n"
-        )
+        err_str = str(exc)
+        # If tools aren't supported, retry without tools
+        if "tool" in err_str.lower() or "function" in err_str.lower():
+            logger.debug("tools_unsupported_fallback", error=err_str)
+            try:
+                fallback_msgs = [system_msg, *list(state.conversation)]
+                models = [chosen_model, *fallback_models]
+                fb_result = _run_completion_with_fallback(
+                    engine=state.completion_engine,
+                    messages=fallback_msgs,
+                    models=models,
+                    session_id=state.session_id,
+                    tier_value=tier_str,
+                )
+                content2 = fb_result.content or ""
+                if content2:
+                    state.conversation.append(
+                        {"role": "assistant", "content": content2}
+                    )
+                    console.print()
+                    console.print(Markdown(content2))
+                    console.print()
+            except Exception as exc2:
+                logger.debug("fallback_error", error=str(exc2))
+                console.print(
+                    f"[red]Error:[/] {_clean_error_message(str(exc2))}\n"
+                )
+        else:
+            logger.debug("completion_error", error=err_str)
+            console.print(
+                f"[red]Error:[/] {_clean_error_message(err_str)}\n"
+            )
+
+
+def _process_prompt_legacy(
+    prompt: str,
+    console: Console,
+    settings: Settings,
+    state: _SessionState,
+) -> None:
+    """Legacy fallback — direct litellm call without full module stack."""
+    import warnings
+    warnings.filterwarnings("ignore", message=".*Task was destroyed.*")
+
+    state.conversation.append({"role": "user", "content": prompt})
+
+    try:
+
+        import litellm
+
+        litellm.suppress_debug_info = True
+        chosen_model = state.pinned_model or _pick_repl_model()
+
+        system_msg = _build_system_prompt()
+        messages: list[dict[str, Any]] = [
+            system_msg, *list(state.conversation),
+        ]
+
+        # Stream with spinner + Rich Live Markdown
+        from prism.cli.stream_handler import StreamHandler
+
+        handler = StreamHandler(console)
+        handler.show_thinking()
+
+        loop = asyncio.new_event_loop()
+        full_content = ""
+        try:
+            response = loop.run_until_complete(
+                litellm.acompletion(
+                    model=chosen_model,
+                    messages=messages,
+                    temperature=0.3,
+                    max_tokens=2048,
+                    stream=True,
+                )
+            )
+
+            async def _consume_stream() -> str:
+                async for chunk in response:
+                    delta = chunk.choices[0].delta.content
+                    if delta:
+                        handler.on_token(delta)
+                return handler.buffer
+
+            full_content = loop.run_until_complete(_consume_stream())
+            handler.finalize()
+        finally:
+            _cleanup_event_loop(loop)
+
+        if full_content:
+            state.conversation.append(
+                {"role": "assistant", "content": full_content}
+            )
+            # Show cost subtly after response
+            console.print()
+    except Exception as exc:
+        logger.debug("legacy_completion_error", error=str(exc))
+        # Show clean error messages — strip LiteLLM/provider noise
+        err_msg = str(exc)
+        # Extract the useful part from litellm error strings
+        for prefix in ("GroqException - ", "OpenrouterException - ",
+                        "DeepseekException - ", "geminiException - "):
+            if prefix in err_msg:
+                err_msg = err_msg.split(prefix, 1)[-1]
+                break
+        if "Cannot connect to host" in err_msg or "nodename nor servname" in err_msg:
+            err_msg = "Network error — check your internet connection."
+        elif "Invalid API Key" in err_msg or "invalid_api_key" in err_msg:
+            err_msg = "Invalid API key. Run: prism auth status"
+        elif "Insufficient Balance" in err_msg:
+            err_msg = "API credits exhausted for this provider."
+        elif "rate-limited" in err_msg.lower() or "429" in err_msg:
+            err_msg = "Rate limited — try again in a moment."
+        console.print(f"[red]Error:[/] {err_msg}\n")

@@ -70,11 +70,15 @@ class ModelSelector:
         self._quality_weight = settings.get("routing.quality_weight", 0.7)
         self._exploration_rate = settings.get("routing.exploration_rate", 0.1)
 
+    # Tier ordering for quality-floor comparisons
+    _TIER_ORDER: dict[str, int] = {"simple": 0, "medium": 1, "complex": 2}
+
     def select(
         self,
         tier: ComplexityTier,
         prompt: str,
         context_tokens: int = 0,
+        tools_enabled: bool = False,
     ) -> ModelSelection:
         """Select the optimal model for a task.
 
@@ -82,6 +86,7 @@ class ModelSelector:
             tier: Classified complexity tier.
             prompt: User's prompt (for token estimation).
             context_tokens: Additional context tokens (repo map, files, history).
+            tools_enabled: Whether tool-use is available for this request.
 
         Returns:
             ModelSelection with chosen model and fallback chain.
@@ -95,10 +100,30 @@ class ModelSelector:
         if pinned:
             return self._select_pinned(pinned, tier, prompt, context_tokens)
 
+        # --- Quality floor: enforce minimum tier when tools are available ---
+        effective_tier = tier
+        if tools_enabled:
+            min_tier_str = getattr(
+                self._settings.config.routing,
+                "tool_use_minimum_tier",
+                "medium",
+            )
+            min_val = self._TIER_ORDER.get(min_tier_str, 1)
+            cur_val = self._TIER_ORDER.get(tier.value, 0)
+            if cur_val < min_val:
+                effective_tier = ComplexityTier(min_tier_str)
+                logger.info(
+                    "tool_use_tier_escalation",
+                    original_tier=tier.value,
+                    effective_tier=effective_tier.value,
+                )
+
         # Get candidates
-        candidates = self._build_candidates(tier, prompt, context_tokens)
+        candidates = self._build_candidates(
+            effective_tier, prompt, context_tokens, tools_enabled=tools_enabled,
+        )
         if not candidates:
-            raise NoModelsAvailableError(tier.value)
+            raise NoModelsAvailableError(effective_tier.value)
 
         # Budget check
         budget_remaining = self._cost_tracker.get_budget_remaining()
@@ -106,7 +131,10 @@ class ModelSelector:
             candidates = self._filter_by_budget(candidates, budget_remaining)
             if not candidates:
                 cheapest = min(
-                    self._build_candidates(tier, prompt, context_tokens),
+                    self._build_candidates(
+                        effective_tier, prompt, context_tokens,
+                        tools_enabled=tools_enabled,
+                    ),
                     key=lambda c: c.estimated_cost,
                     default=None,
                 )
@@ -124,13 +152,13 @@ class ModelSelector:
             c.model.id for c in ranked if c.model.id != selected.model.id
         ][:4]  # Keep top 4 fallbacks
 
-        reasoning = self._explain_selection(selected, ranked, tier)
+        reasoning = self._explain_selection(selected, ranked, effective_tier)
 
         logger.info(
             "model_selected",
             model=selected.model.id,
             provider=selected.model.provider,
-            tier=tier.value,
+            tier=effective_tier.value,
             cost_est=f"${selected.estimated_cost:.6f}",
             rank_score=round(selected.rank_score, 3),
             success_rate=round(selected.success_rate, 3),
@@ -140,7 +168,7 @@ class ModelSelector:
         return ModelSelection(
             model_id=selected.model.id,
             provider=selected.model.provider,
-            tier=tier,
+            tier=effective_tier,
             estimated_cost=selected.estimated_cost,
             fallback_chain=fallback_chain,
             reasoning=reasoning,
@@ -181,6 +209,8 @@ class ModelSelector:
         tier: ComplexityTier,
         prompt: str,
         context_tokens: int,
+        *,
+        tools_enabled: bool = False,
     ) -> list[ModelCandidate]:
         """Build the list of candidate models for a tier.
 
@@ -188,6 +218,7 @@ class ModelSelector:
             tier: Target complexity tier.
             prompt: User's prompt.
             context_tokens: Additional context tokens.
+            tools_enabled: When True, exclude models that do not support tools.
 
         Returns:
             List of ModelCandidate with estimated costs and success rates.
@@ -198,6 +229,14 @@ class ModelSelector:
 
         candidates: list[ModelCandidate] = []
         for model in models:
+            # Skip models that don't support tools when tools are required
+            if tools_enabled and not model.supports_tools:
+                logger.debug(
+                    "model_no_tool_support",
+                    model=model.id,
+                )
+                continue
+
             # Skip models that can't fit the context
             if input_tokens + output_tokens > model.context_window * 0.9:
                 logger.debug(

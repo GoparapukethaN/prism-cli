@@ -21,6 +21,7 @@ PROVIDER_ENV_MAP: dict[str, str] = {
     "deepseek": "DEEPSEEK_API_KEY",
     "groq": "GROQ_API_KEY",
     "mistral": "MISTRAL_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
 
 

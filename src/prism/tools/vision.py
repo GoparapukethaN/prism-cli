@@ -1,7 +1,7 @@
 """Vision and multimodal input -- image processing and attachment for LLM conversations.
 
 Provides image loading, validation, compression, base64 encoding, terminal
-preview, and message formatting for vision-capable LLM models.
+preview, message formatting, and a ``VisionTool`` for the tool registry.
 
 No heavy dependencies required -- uses raw byte parsing for image dimensions
 and ``sips`` (macOS) for compression.  Falls back gracefully on other platforms.
@@ -12,12 +12,18 @@ from __future__ import annotations
 import base64
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 import structlog
+
+from prism.tools.base import PermissionLevel, Tool, ToolResult
 
 logger = structlog.get_logger(__name__)
 
@@ -46,15 +52,30 @@ VISION_MODELS: dict[str, list[str]] = {
 
 ALL_VISION_MODELS: list[str] = [m for models in VISION_MODELS.values() for m in models]
 
+# Patterns that indicate a model supports vision (case-insensitive).
+_VISION_PATTERN = re.compile(
+    r"vision|gpt-4o|claude-3|gemini",
+    re.IGNORECASE,
+)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_IMAGE_SIZE_BYTES: int = 1_048_576  # 1 MB
+MAX_IMAGE_SIZE_BYTES: int = 5_242_880  # 5 MB (matches resize_if_needed default)
 SUPPORTED_FORMATS: set[str] = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif",
 }
 TARGET_FORMAT: str = "JPEG"  # Default compression target
+
+# Image magic-byte signatures for validation.
+_MAGIC_SIGNATURES: list[tuple[bytes, str]] = [
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"RIFF", "image/webp"),  # WebP starts with RIFF...WEBP
+]
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +143,364 @@ class ImageAttachment:
 
 
 # ---------------------------------------------------------------------------
+# ImageProcessor
+# ---------------------------------------------------------------------------
+
+
+class ImageProcessor:
+    """Loads, validates, and resizes images from various sources.
+
+    Supports local file paths, remote URLs, and raw bytes.  All operations
+    are synchronous; URL fetching uses ``httpx`` with a short timeout.
+    """
+
+    # MIME mapping (extension -> media type)
+    _MIME_MAP: dict[str, str] = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+        ".tiff": "image/tiff",
+        ".tif": "image/tiff",
+    }
+
+    def load_from_path(self, path: str) -> tuple[str, str]:
+        """Read a local image file and return its base64-encoded data.
+
+        Args:
+            path: Absolute or relative file system path.
+
+        Returns:
+            ``(base64_data, mime_type)`` tuple.
+
+        Raises:
+            ValueError: If the path does not exist, escapes the working
+                directory via traversal, or is not a valid image.
+        """
+        resolved = Path(path).resolve()
+
+        # Path traversal check: reject ``..`` components in the raw string.
+        if ".." in Path(path).parts:
+            raise ValueError(f"Path traversal detected: {path}")
+
+        if not resolved.is_file():
+            raise ValueError(f"Image file not found: {path}")
+
+        raw_data = resolved.read_bytes()
+
+        if not self.validate_image(raw_data):
+            raise ValueError(f"File is not a valid image: {path}")
+
+        mime_type = self._mime_from_magic(raw_data)
+        if mime_type is None:
+            suffix = resolved.suffix.lower()
+            mime_type = self._MIME_MAP.get(suffix, "image/jpeg")
+
+        b64 = base64.b64encode(raw_data).decode("ascii")
+        return b64, mime_type
+
+    def load_from_url(self, url: str) -> tuple[str, str]:
+        """Fetch an image from a URL and return its base64-encoded data.
+
+        Args:
+            url: HTTP or HTTPS URL pointing to an image.
+
+        Returns:
+            ``(base64_data, mime_type)`` tuple.
+
+        Raises:
+            ValueError: If the URL scheme is not http(s), the fetch fails,
+                or the response is not a valid image.
+        """
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
+
+        try:
+            with httpx.Client(timeout=30, follow_redirects=True) as client:
+                response = client.get(url)
+                response.raise_for_status()
+        except (httpx.HTTPError, OSError) as exc:
+            raise ValueError(f"Failed to fetch image from URL: {exc}") from exc
+
+        raw_data = response.content
+
+        if not self.validate_image(raw_data):
+            raise ValueError(f"URL did not return a valid image: {url}")
+
+        content_type = response.headers.get("content-type", "")
+        mime_type = self._mime_from_content_type(content_type)
+        if mime_type is None:
+            mime_type = self._mime_from_magic(raw_data) or "image/jpeg"
+
+        b64 = base64.b64encode(raw_data).decode("ascii")
+        return b64, mime_type
+
+    @staticmethod
+    def validate_image(data: bytes) -> bool:
+        """Check whether *data* starts with a known image magic signature.
+
+        Args:
+            data: Raw bytes to inspect.
+
+        Returns:
+            ``True`` if the first bytes match PNG, JPEG, GIF, or WebP.
+        """
+        if len(data) < 4:
+            return False
+
+        # PNG
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return True
+
+        # JPEG
+        if data[:3] == b"\xff\xd8\xff":
+            return True
+
+        # GIF
+        if data[:6] in (b"GIF87a", b"GIF89a"):
+            return True
+
+        # WebP: RIFF....WEBP
+        return data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP"
+
+    @staticmethod
+    def resize_if_needed(
+        data: bytes, max_size: int = MAX_IMAGE_SIZE_BYTES
+    ) -> bytes:
+        """Return *data* unchanged if within *max_size*, else truncate.
+
+        For production use this would re-encode at a lower quality.
+        This implementation returns a truncated copy as a size-reduction
+        placeholder; real compression requires PIL or ``sips``.
+
+        Args:
+            data: Raw image bytes.
+            max_size: Maximum allowed size in bytes (default 5 MB).
+
+        Returns:
+            The original bytes if small enough, otherwise the first
+            *max_size* bytes (best-effort; caller should re-validate).
+        """
+        if len(data) <= max_size:
+            return data
+        logger.warning(
+            "image_resize_truncated",
+            original=len(data),
+            limit=max_size,
+        )
+        return data[:max_size]
+
+    # ---- private helpers ------------------------------------------------
+
+    @staticmethod
+    def _mime_from_magic(data: bytes) -> str | None:
+        """Infer MIME type from magic bytes.
+
+        Args:
+            data: Raw file bytes.
+
+        Returns:
+            MIME type string or ``None``.
+        """
+        for sig, mime in _MAGIC_SIGNATURES:
+            if data[: len(sig)] == sig:
+                # WebP needs extra check
+                if mime == "image/webp":
+                    if len(data) >= 12 and data[8:12] == b"WEBP":
+                        return mime
+                    continue
+                return mime
+        return None
+
+    @staticmethod
+    def _mime_from_content_type(content_type: str) -> str | None:
+        """Extract a recognised image MIME from a Content-Type header.
+
+        Args:
+            content_type: HTTP Content-Type value.
+
+        Returns:
+            MIME type string or ``None``.
+        """
+        ct_lower = content_type.lower()
+        for mime in ("image/png", "image/jpeg", "image/gif", "image/webp"):
+            if mime in ct_lower:
+                return mime
+        return None
+
+
+# ---------------------------------------------------------------------------
+# build_vision_message (OpenAI-format)
+# ---------------------------------------------------------------------------
+
+
+def build_vision_message(
+    image_data: str,
+    mime_type: str,
+    prompt: str,
+) -> dict[str, Any]:
+    """Build an OpenAI-format multimodal user message.
+
+    Args:
+        image_data: Base64-encoded image bytes.
+        mime_type: MIME type (e.g. ``"image/png"``).
+        prompt: Text prompt to accompany the image.
+
+    Returns:
+        A dict with ``role`` and ``content`` keys suitable for
+        direct inclusion in a chat completion messages list.
+    """
+    return {
+        "role": "user",
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{image_data}",
+                },
+            },
+            {
+                "type": "text",
+                "text": prompt,
+            },
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# VisionTool
+# ---------------------------------------------------------------------------
+
+
+class VisionTool(Tool):
+    """Analyse an image from a local file, URL, or base64 data.
+
+    The tool loads the image, validates it, and returns a multimodal
+    message structure that the conversation engine can insert into
+    the LLM chat context.
+
+    Accepted ``source`` formats:
+      - A local file path (absolute or relative).
+      - An ``http://`` or ``https://`` URL.
+      - A ``base64:`` prefixed string with raw base64 data.
+    """
+
+    def __init__(self) -> None:
+        self._processor = ImageProcessor()
+
+    @property
+    def name(self) -> str:
+        return "analyze_image"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Analyse an image from a local file path, URL, or base64 data. "
+            "Returns a multimodal message for the LLM conversation."
+        )
+
+    @property
+    def parameters_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "description": (
+                        "Image source: a local file path, an http(s) URL, "
+                        "or 'base64:<data>'."
+                    ),
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "What to analyse about the image.",
+                    "default": "Describe this image in detail.",
+                },
+            },
+            "required": ["source"],
+        }
+
+    @property
+    def permission_level(self) -> PermissionLevel:
+        return PermissionLevel.AUTO
+
+    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """Load the image and return a multimodal message structure.
+
+        Args:
+            arguments: Must contain ``source``; optional ``prompt``.
+
+        Returns:
+            A ``ToolResult`` whose ``output`` is a human-readable summary
+            and whose ``metadata["vision_message"]`` contains the dict
+            ready for LLM injection.
+        """
+        validated = self.validate_arguments(arguments)
+        source: str = validated["source"]
+        prompt: str = validated.get("prompt", "Describe this image in detail.")
+
+        try:
+            b64_data, mime_type = self._resolve_source(source)
+        except ValueError as exc:
+            return ToolResult(success=False, output="", error=str(exc))
+
+        vision_msg = build_vision_message(b64_data, mime_type, prompt)
+
+        return ToolResult(
+            success=True,
+            output=(
+                f"Image loaded ({mime_type}, "
+                f"{len(b64_data)} base64 chars). "
+                f"Prompt: {prompt}"
+            ),
+            metadata={
+                "vision_message": vision_msg,
+                "mime_type": mime_type,
+                "base64_length": len(b64_data),
+            },
+        )
+
+    # ---- private helpers ------------------------------------------------
+
+    def _resolve_source(self, source: str) -> tuple[str, str]:
+        """Dispatch to the appropriate loader based on source format.
+
+        Args:
+            source: Raw source string from the user.
+
+        Returns:
+            ``(base64_data, mime_type)`` tuple.
+
+        Raises:
+            ValueError: On any load/validation failure.
+        """
+        # Already base64-encoded data
+        if source.startswith("base64:"):
+            raw_b64 = source[7:]
+            if not raw_b64:
+                raise ValueError("Empty base64 data provided.")
+            # Validate it decodes
+            try:
+                decoded = base64.b64decode(raw_b64, validate=True)
+            except Exception as exc:
+                raise ValueError(f"Invalid base64 data: {exc}") from exc
+            if not self._processor.validate_image(decoded):
+                raise ValueError("Base64 data is not a valid image.")
+            mime = ImageProcessor._mime_from_magic(decoded) or "image/jpeg"
+            return raw_b64, mime
+
+        # URL
+        if source.startswith(("http://", "https://")):
+            return self._processor.load_from_url(source)
+
+        # Local file path
+        return self._processor.load_from_path(source)
+
+
+# ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
 
@@ -129,9 +508,11 @@ class ImageAttachment:
 def is_vision_model(model_id: str) -> bool:
     """Check whether *model_id* supports vision / image input.
 
-    The comparison is case-insensitive and checks for substring matches
-    so that prefixed model ids (e.g. ``anthropic/claude-3-opus-20240229``)
-    are recognised.
+    Uses both the explicit ``ALL_VISION_MODELS`` list (substring match)
+    and a pattern-based heuristic for model families known to support
+    vision (``"vision"``, ``"gpt-4o"``, ``"claude-3"``, ``"gemini"``).
+
+    The comparison is case-insensitive.
 
     Args:
         model_id: The model identifier to test.
@@ -140,10 +521,16 @@ def is_vision_model(model_id: str) -> bool:
         ``True`` if the model is known to support vision.
     """
     model_lower = model_id.lower()
-    return any(
+
+    # Explicit match against the known model list
+    if any(
         m.lower() in model_lower or model_lower in m.lower()
         for m in ALL_VISION_MODELS
-    )
+    ):
+        return True
+
+    # Pattern-based heuristic
+    return bool(_VISION_PATTERN.search(model_lower))
 
 
 def get_vision_models_for_provider(provider: str) -> list[str]:

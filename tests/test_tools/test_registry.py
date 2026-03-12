@@ -141,6 +141,10 @@ class TestToolRegistry:
             "list_directory",
             "search_codebase",
             "execute_command",
+            "git",
+            "analyze_image",
+            "auto_test",
+            "quality_gate",
         }
         assert set(reg.tool_names) == expected
 

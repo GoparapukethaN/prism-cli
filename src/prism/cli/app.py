@@ -130,6 +130,11 @@ def main_callback(
         "--no-verify-ssl",
         help="Skip SSL certificate verification (dangerous).",
     ),
+    dangerously_skip_permissions: bool = typer.Option(
+        False,
+        "--dangerously-skip-permissions",
+        help="Skip ALL permission prompts including dangerous tools.",
+    ),
 ) -> None:
     """Start Prism interactive REPL or run with subcommands."""
     if ctx.invoked_subcommand is not None:
@@ -151,6 +156,7 @@ def main_callback(
         no_cache=no_cache,
         project=project,
         no_verify_ssl=no_verify_ssl,
+        dangerously_skip_permissions=dangerously_skip_permissions,
     )
 
 
@@ -168,6 +174,7 @@ def _start_repl(
     no_cache: bool = False,
     project: str | None = None,
     no_verify_ssl: bool = False,
+    dangerously_skip_permissions: bool = False,
 ) -> None:
     """Initialize and start the interactive REPL."""
     import os
@@ -246,6 +253,7 @@ def _start_repl(
         dry_run=dry_run,
         offline=offline,
         no_cache=no_cache,
+        skip_permissions=dangerously_skip_permissions,
     )
 
 
@@ -299,16 +307,13 @@ def _show_recent_projects(settings: object) -> None:
 
 def _print_banner(settings: object) -> None:
     """Print the welcome banner."""
-    from rich.panel import Panel
-
     console.print()
     console.print(
-        Panel(
-            f"[bold cyan]Prism[/bold cyan] v{__version__} — "
-            "Multi-API Intelligent Router\n"
-            "[dim]Type your request, or use /help for commands.[/dim]",
-            border_style="cyan",
-        )
+        f"  [bold cyan]Prism[/bold cyan] [dim]v{__version__}[/dim]"
+    )
+    console.print(
+        "  [dim]Type your request, or /help for commands. "
+        "Ctrl+C to cancel, /exit to quit.[/dim]"
     )
     console.print()
 
@@ -321,8 +326,19 @@ def auth_add(
     provider: str = typer.Argument(
         help="Provider name (anthropic, openai, google, deepseek, groq, mistral).",
     ),
+    key: str | None = typer.Argument(
+        None,
+        help="API key (optional — prompted interactively if omitted).",
+    ),
 ) -> None:
-    """Add an API key for a provider."""
+    """Add an API key for a provider.
+
+    You can pass the key directly or let Prism prompt you::
+
+        prism auth add openai sk-...
+        prism auth add openai            # prompts interactively
+        echo $KEY | prism auth add openai --stdin
+    """
     from prism.config.settings import load_settings
 
     settings = load_settings()
@@ -332,49 +348,56 @@ def auth_add(
 
     auth = AuthManager(settings)
 
-    console.print(f"Adding API key for [bold]{provider}[/bold]...")
-    key = typer.prompt("API key", hide_input=True)
+    if key is None:
+        # Try reading from stdin (piped input)
+        import sys
 
-    if not key.strip():
+        if not sys.stdin.isatty():
+            key = sys.stdin.readline().strip()
+        else:
+            console.print(f"Adding API key for [bold]{provider}[/bold]...")
+            key = typer.prompt("API key", hide_input=True)
+
+    if not key or not key.strip():
         console.print("[red]Error:[/] API key cannot be empty.")
         raise typer.Exit(1)
+
+    key = key.strip()
 
     from prism.auth.validator import KeyValidator
 
     validator = KeyValidator()
-    if not validator.validate_key(provider, key.strip()):
+    if not validator.validate_key(provider, key):
         console.print(
             f"[yellow]Warning:[/] Key format doesn't match expected pattern for {provider}. "
             "Storing anyway."
         )
 
-    auth.store_key(provider, key.strip())
-    masked = "..." + key.strip()[-4:] if len(key.strip()) > 4 else "****"
+    auth.store_key(provider, key)
+    masked = "..." + key[-4:] if len(key) > 4 else "****"
     console.print(f"[green]Stored[/green] API key for {provider} ({masked})")
 
 
 @auth_app.command("status")
 def auth_status() -> None:
     """Show status of all configured providers."""
-    from prism.config.settings import load_settings
-
-    settings = load_settings()
-
     from prism.auth.manager import AuthManager
 
-    auth = AuthManager(settings)
+    auth = AuthManager()
     statuses = auth.list_configured()
 
     console.print()
     for status in statuses:
-        if status["configured"]:
-            models = ", ".join(status.get("models", []))
+        display = status.provider
+        configured = status.has_key
+        source = status.source or ""
+        if configured:
             console.print(
-                f"  [green]✓[/green] [bold]{status['display_name']:15s}[/bold] ({models})"
+                f"  [green]✓[/green] [bold]{display:15s}[/bold] (via {source})"
             )
         else:
             console.print(
-                f"  [red]✗[/red] [bold]{status['display_name']:15s}[/bold] (not configured)"
+                f"  [red]✗[/red] [bold]{display:15s}[/bold] (not configured)"
             )
     console.print()
 
@@ -384,13 +407,9 @@ def auth_remove(
     provider: str = typer.Argument(help="Provider name to remove."),
 ) -> None:
     """Remove a stored API key."""
-    from prism.config.settings import load_settings
-
-    settings = load_settings()
-
     from prism.auth.manager import AuthManager
 
-    auth = AuthManager(settings)
+    auth = AuthManager()
     auth.remove_key(provider)
     console.print(f"[green]Removed[/green] API key for {provider}")
 
@@ -689,8 +708,100 @@ def ask(
     root: Path | None = typer.Option(None, "--root", "-r"),
 ) -> None:
     """Ask a one-shot question (no interactive REPL)."""
-    console.print(f"[dim]Processing:[/] {prompt[:80]}...")
-    console.print("[yellow]Single-shot mode not yet implemented. Use interactive REPL.[/]")
+    import asyncio
+    import logging as _logging
+
+    # Suppress all library noise
+    _configure_logging("WARNING")
+    import warnings as _warnings
+    _warnings.filterwarnings("ignore", category=RuntimeWarning)
+    _warnings.filterwarnings("ignore", message=".*unauthenticated.*HF Hub.*")
+    _logging.getLogger("LiteLLM").setLevel(_logging.CRITICAL)
+    _logging.getLogger("litellm").setLevel(_logging.CRITICAL)
+    _logging.getLogger("httpx").setLevel(_logging.WARNING)
+    _logging.getLogger("huggingface_hub").setLevel(_logging.CRITICAL)
+
+    async def _run() -> None:
+
+        # Default model if none specified
+        chosen_model = model or _pick_default_model()
+
+        try:
+            import litellm
+
+            litellm.suppress_debug_info = True
+            response = await litellm.acompletion(
+                model=chosen_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are Prism, a helpful AI assistant. "
+                            "Be conversational and concise. "
+                            "Answer naturally like a colleague would. "
+                            "Use markdown for formatting. "
+                            "Keep responses focused and short."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_tokens=1024,
+                stream=True,
+            )
+
+            # Stream with spinner + Rich Live Markdown
+            from prism.cli.stream_handler import StreamHandler
+
+            handler = StreamHandler(console)
+            handler.show_thinking()
+            async for chunk in response:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    handler.on_token(delta)
+            handler.finalize()
+        except ImportError:
+            console.print(
+                "[red]litellm not installed.[/] "
+                "Run: pip install litellm"
+            )
+        except Exception as exc:
+            err_msg = str(exc)
+            if "Cannot connect" in err_msg or "nodename nor" in err_msg:
+                err_msg = "Network error — check your internet connection."
+            elif "Invalid API Key" in err_msg or "invalid_api_key" in err_msg:
+                err_msg = "Invalid API key. Run: prism auth status"
+            elif "Insufficient Balance" in err_msg:
+                err_msg = "API credits exhausted for this provider."
+            elif "rate-limited" in err_msg.lower() or "429" in err_msg:
+                err_msg = "Rate limited — try again in a moment."
+            console.print(f"[red]Error:[/] {err_msg}")
+
+    asyncio.run(_run())
+
+
+def _pick_default_model() -> str:
+    """Pick the best available model based on env vars.
+
+    Priority: paid frontier models first (best quality), then reliable
+    free-tier providers, then free aggregators.
+    """
+    import os
+
+    providers = [
+        ("ANTHROPIC_API_KEY", "anthropic/claude-sonnet-4-20250514"),
+        ("OPENAI_API_KEY", "gpt-4o-mini"),
+        ("MISTRAL_API_KEY", "mistral/mistral-small-latest"),
+        ("GROQ_API_KEY", "groq/llama-3.3-70b-versatile"),
+        ("DEEPSEEK_API_KEY", "deepseek/deepseek-chat"),
+        ("GOOGLE_API_KEY", "gemini/gemini-2.0-flash"),
+        ("GEMINI_API_KEY", "gemini/gemini-2.0-flash"),
+        ("OPENROUTER_API_KEY", "openrouter/meta-llama/llama-3.3-70b-instruct:free"),
+    ]
+    for env_var, model_id in providers:
+        if os.environ.get(env_var):
+            return model_id
+    return "groq/llama-3.3-70b-versatile"
 
 
 @app.command("architect")
@@ -915,6 +1026,7 @@ def init_project(
 @app.command("status")
 def status() -> None:
     """Check status of all providers and system health."""
+    _configure_logging("WARNING")
     from prism.config.settings import load_settings
 
     settings = load_settings()
@@ -2036,5 +2148,33 @@ def why_command(
 
 
 def main() -> None:
-    """Entry point for the Prism CLI."""
+    """Entry point for the Prism CLI.
+
+    Automatically loads environment variables from ``.env`` files before
+    any commands run.  Search order:
+
+    1. ``.env`` in the current working directory
+    2. ``.env`` in ``~/.prism/``
+
+    This means users can ``cp .env.example .env`` and fill in their keys —
+    Prism picks them up automatically without ``prism auth add``.
+    """
+    import os
+    from pathlib import Path as _Path
+
+    # Suppress noisy library warnings before any imports
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+    from dotenv import load_dotenv
+
+    # Load .env from current directory (project-level keys)
+    load_dotenv(override=False)
+
+    # Also try ~/.prism/.env (global keys)
+    prism_home = os.environ.get("PRISM_HOME")
+    global_env = (_Path(prism_home) if prism_home else _Path.home() / ".prism") / ".env"
+    if global_env.is_file():
+        load_dotenv(global_env, override=False)
+
     app()

@@ -133,3 +133,63 @@ class TestWriteFileTool:
         )
         assert result.success is False
         assert result.error is not None
+
+
+class TestWriteFilePreviewDiff:
+    """Tests for WriteFileTool.generate_preview_diff()."""
+
+    def test_new_file_diff_shows_all_additions(
+        self, write_tool: WriteFileTool, project_dir: Path
+    ) -> None:
+        """New file diff shows every line as an addition."""
+        diff_text, is_new = write_tool.generate_preview_diff(
+            {"path": "brand_new.py", "content": "x = 1\ny = 2\n"}
+        )
+        assert is_new is True
+        assert "+x = 1" in diff_text
+        assert "+y = 2" in diff_text
+        assert "/dev/null" in diff_text
+        assert "b/brand_new.py" in diff_text
+
+    def test_new_file_does_not_write(
+        self, write_tool: WriteFileTool, project_dir: Path
+    ) -> None:
+        """generate_preview_diff must not create the file on disk."""
+        write_tool.generate_preview_diff(
+            {"path": "should_not_exist.py", "content": "data"}
+        )
+        assert not (project_dir / "should_not_exist.py").exists()
+
+    def test_overwrite_diff_shows_changes(
+        self, write_tool: WriteFileTool, project_dir: Path
+    ) -> None:
+        """Overwriting an existing file produces a proper unified diff."""
+        diff_text, is_new = write_tool.generate_preview_diff(
+            {"path": "README.md", "content": "# Updated\n"}
+        )
+        assert is_new is False
+        assert "---" in diff_text
+        assert "+++" in diff_text
+        assert "-# Test Project" in diff_text
+        assert "+# Updated" in diff_text
+
+    def test_overwrite_identical_content_returns_empty(
+        self, write_tool: WriteFileTool, project_dir: Path
+    ) -> None:
+        """When content is identical, the diff text is empty."""
+        original_content = (project_dir / "README.md").read_text()
+        diff_text, is_new = write_tool.generate_preview_diff(
+            {"path": "README.md", "content": original_content}
+        )
+        assert is_new is False
+        assert diff_text == ""
+
+    def test_new_file_single_line_no_trailing_newline(
+        self, write_tool: WriteFileTool, project_dir: Path
+    ) -> None:
+        """A single-line file without trailing newline still produces valid diff."""
+        diff_text, is_new = write_tool.generate_preview_diff(
+            {"path": "one_liner.txt", "content": "hello"}
+        )
+        assert is_new is True
+        assert "+hello" in diff_text

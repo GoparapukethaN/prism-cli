@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from prism.cli.ui.display import (
     display_classification,
+    display_diff,
     display_error,
     display_model_selection,
     display_status,
@@ -286,6 +287,48 @@ class TestDisplayStreamingToken:
         output = _get_output(plain_console)
         assert "foo" in output
         assert "bar" in output
+
+
+# ---------------------------------------------------------------------------
+# display_diff
+# ---------------------------------------------------------------------------
+
+
+class TestDisplayDiff:
+    """Tests for the diff preview display."""
+
+    def test_shows_diff_content(self, plain_console: Console) -> None:
+        diff = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+        display_diff(diff, file_path="foo.py", console=plain_console)
+        output = _get_output(plain_console)
+        assert "old" in output
+        assert "new" in output
+
+    def test_shows_file_path_in_title(self, plain_console: Console) -> None:
+        diff = "-old\n+new\n"
+        display_diff(diff, file_path="src/app.py", console=plain_console)
+        output = _get_output(plain_console)
+        assert "src/app.py" in output
+
+    def test_empty_diff_shows_no_changes(self, plain_console: Console) -> None:
+        display_diff("", file_path="foo.py", console=plain_console)
+        output = _get_output(plain_console)
+        assert "no changes" in output
+
+    def test_whitespace_only_diff_shows_no_changes(self, plain_console: Console) -> None:
+        display_diff("   \n  ", file_path="foo.py", console=plain_console)
+        output = _get_output(plain_console)
+        assert "no changes" in output
+
+    def test_no_file_path_uses_generic_title(self, plain_console: Console) -> None:
+        diff = "+added line\n"
+        display_diff(diff, console=plain_console)
+        output = _get_output(plain_console)
+        assert "Diff Preview" in output
+
+    def test_default_console_does_not_raise(self) -> None:
+        """display_diff should not raise when called without a console."""
+        display_diff("-old\n+new\n", file_path="test.py")
 
 
 # ---------------------------------------------------------------------------

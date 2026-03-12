@@ -42,6 +42,10 @@ _FORMAT_RULES: dict[str, tuple[str, re.Pattern[str] | None]] = {
         "must be non-empty",
         None,
     ),
+    "openrouter": (
+        "must start with 'sk-or-'",
+        re.compile(r"^sk-or-.+"),
+    ),
 }
 
 

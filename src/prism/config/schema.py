@@ -39,6 +39,14 @@ class RoutingConfig(BaseModel):
         le=1.0,
         description="Weight for quality vs cost in model ranking (higher = prefer quality)",
     )
+    tool_use_minimum_tier: str = Field(
+        default="medium",
+        description="Minimum tier when tools are available (simple, medium, or complex)",
+    )
+    escalate_on_tool_use: bool = Field(
+        default=True,
+        description="Auto-escalate model when tool-use is detected at runtime",
+    )
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> RoutingConfig:
@@ -46,6 +54,13 @@ class RoutingConfig(BaseModel):
             msg = (
                 f"simple_threshold ({self.simple_threshold}) must be less than "
                 f"medium_threshold ({self.medium_threshold})"
+            )
+            raise ValueError(msg)
+        valid_tiers = {"simple", "medium", "complex"}
+        if self.tool_use_minimum_tier not in valid_tiers:
+            msg = (
+                f"tool_use_minimum_tier must be one of {valid_tiers}, "
+                f"got {self.tool_use_minimum_tier!r}"
             )
             raise ValueError(msg)
         return self

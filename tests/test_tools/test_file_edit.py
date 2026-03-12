@@ -173,3 +173,85 @@ class TestEditFileTool:
         content = target.read_text()
         assert "delete this" not in content
         assert "keep this" in content
+
+
+class TestEditFilePreviewDiff:
+    """Tests for EditFileTool.generate_preview_diff()."""
+
+    def test_preview_shows_replacement(
+        self, edit_tool: EditFileTool, project_dir: Path
+    ) -> None:
+        """Preview diff shows the search/replace change."""
+        diff_text = edit_tool.generate_preview_diff({
+            "path": "src/main.py",
+            "search": 'print("hello world")',
+            "replace": 'print("goodbye world")',
+        })
+        assert diff_text is not None
+        assert '-    print("hello world")' in diff_text
+        assert '+    print("goodbye world")' in diff_text
+
+    def test_preview_does_not_write(
+        self, edit_tool: EditFileTool, project_dir: Path
+    ) -> None:
+        """generate_preview_diff must not modify the file."""
+        original = (project_dir / "src" / "main.py").read_text()
+        edit_tool.generate_preview_diff({
+            "path": "src/main.py",
+            "search": 'print("hello world")',
+            "replace": 'print("changed")',
+        })
+        after = (project_dir / "src" / "main.py").read_text()
+        assert original == after
+
+    def test_preview_returns_none_when_not_found(
+        self, edit_tool: EditFileTool, project_dir: Path
+    ) -> None:
+        """Returns None when search string is not in the file."""
+        diff_text = edit_tool.generate_preview_diff({
+            "path": "src/main.py",
+            "search": "this text does not exist",
+            "replace": "replacement",
+        })
+        assert diff_text is None
+
+    def test_preview_returns_none_for_missing_file(
+        self, edit_tool: EditFileTool, project_dir: Path
+    ) -> None:
+        """Returns None when the file does not exist."""
+        diff_text = edit_tool.generate_preview_diff({
+            "path": "no_such_file.py",
+            "search": "x",
+            "replace": "y",
+        })
+        assert diff_text is None
+
+    def test_preview_multiline_replacement(
+        self, edit_tool: EditFileTool, project_dir: Path
+    ) -> None:
+        """Preview works for multi-line search and replace strings."""
+        target = project_dir / "multi.py"
+        target.write_text("line1\nline2\nline3\nline4\n")
+
+        diff_text = edit_tool.generate_preview_diff({
+            "path": "multi.py",
+            "search": "line2\nline3",
+            "replace": "replaced2\nreplaced3\nextra_line",
+        })
+        assert diff_text is not None
+        assert "-line2" in diff_text
+        assert "-line3" in diff_text
+        assert "+replaced2" in diff_text
+        assert "+replaced3" in diff_text
+        assert "+extra_line" in diff_text
+
+    def test_preview_identical_replacement_returns_none(
+        self, edit_tool: EditFileTool, project_dir: Path
+    ) -> None:
+        """When search and replace are the same, returns None (no diff)."""
+        diff_text = edit_tool.generate_preview_diff({
+            "path": "src/main.py",
+            "search": "return 42",
+            "replace": "return 42",
+        })
+        assert diff_text is None

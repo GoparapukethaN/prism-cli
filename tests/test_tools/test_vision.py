@@ -1,7 +1,8 @@
 """Tests for vision and multimodal input -- image processing for LLM conversations.
 
-All filesystem access uses ``tmp_path``; subprocess calls (``sips``) are mocked;
-environment variables for terminal detection are patched.
+All filesystem access uses ``tmp_path``; URL fetches are mocked via httpx;
+subprocess calls (``sips``) are mocked; environment variables for terminal
+detection are patched.  No real file I/O outside of ``tmp_path``.
 """
 
 from __future__ import annotations
@@ -13,15 +14,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from prism.tools.base import PermissionLevel
 from prism.tools.vision import (
     ALL_VISION_MODELS,
     MAX_IMAGE_SIZE_BYTES,
     SUPPORTED_FORMATS,
     VISION_MODELS,
     ImageAttachment,
+    ImageProcessor,
+    VisionTool,
     _get_image_dimensions,
     _get_media_type,
     build_multimodal_messages,
+    build_vision_message,
     detect_terminal_image_support,
     display_image_preview,
     get_vision_models_for_provider,
@@ -82,6 +87,17 @@ def _make_jpeg_bytes(width: int = 640, height: int = 480) -> bytes:
     # EOI
     eoi = b"\xff\xd9"
     return soi + app0 + sof0 + eoi
+
+
+def _make_gif_bytes() -> bytes:
+    """Build minimal GIF89a header bytes."""
+    return b"GIF89a" + b"\x00" * 20
+
+
+def _make_webp_bytes() -> bytes:
+    """Build minimal WebP header bytes (RIFF...WEBP)."""
+    # RIFF + 4-byte size + WEBP + padding
+    return b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"\x00" * 20
 
 
 def _make_dummy_attachment(
@@ -196,6 +212,15 @@ class TestIsVisionModel:
 
     def test_prefixed_model_id(self) -> None:
         assert is_vision_model("anthropic/claude-3-opus-20240229") is True
+
+    def test_vision_keyword_in_name(self) -> None:
+        assert is_vision_model("my-custom-vision-model") is True
+
+    def test_gemini_keyword_match(self) -> None:
+        assert is_vision_model("gemini-2.5-pro") is True
+
+    def test_claude3_pattern_match(self) -> None:
+        assert is_vision_model("claude-3-unknown-variant") is True
 
 
 # =====================================================================
@@ -392,8 +417,7 @@ class TestProcessImage:
 
     def test_gif_format(self, tmp_path: Path) -> None:
         img = tmp_path / "anim.gif"
-        # GIF89a header (not enough to parse dimensions, that's fine)
-        img.write_bytes(b"GIF89a" + b"\x00" * 20)
+        img.write_bytes(_make_gif_bytes())
 
         att = process_image(img)
 
@@ -403,7 +427,7 @@ class TestProcessImage:
 
     def test_webp_format(self, tmp_path: Path) -> None:
         img = tmp_path / "photo.webp"
-        img.write_bytes(b"RIFF" + b"\x00" * 20 + b"WEBP" + b"\x00" * 20)
+        img.write_bytes(_make_webp_bytes())
 
         att = process_image(img)
 
@@ -507,6 +531,385 @@ class TestBuildMultimodalMessages:
 
         assert content_a[0]["type"] == "image"
         assert content_o[0]["type"] == "image_url"
+
+
+# =====================================================================
+# TestBuildVisionMessage (OpenAI-format standalone function)
+# =====================================================================
+
+
+class TestBuildVisionMessage:
+    """Verify ``build_vision_message`` produces the correct structure."""
+
+    def test_basic_structure(self) -> None:
+        msg = build_vision_message("AAAA", "image/png", "What is this?")
+
+        assert msg["role"] == "user"
+        assert len(msg["content"]) == 2
+        assert msg["content"][0]["type"] == "image_url"
+        assert msg["content"][1]["type"] == "text"
+        assert msg["content"][1]["text"] == "What is this?"
+
+    def test_data_url_format(self) -> None:
+        msg = build_vision_message("BASE64DATA", "image/jpeg", "Describe")
+
+        url = msg["content"][0]["image_url"]["url"]
+        assert url == "data:image/jpeg;base64,BASE64DATA"
+
+    def test_different_mime_types(self) -> None:
+        for mime in ("image/png", "image/gif", "image/webp"):
+            msg = build_vision_message("x", mime, "test")
+            url = msg["content"][0]["image_url"]["url"]
+            assert url.startswith(f"data:{mime};base64,")
+
+
+# =====================================================================
+# TestImageProcessor
+# =====================================================================
+
+
+class TestImageProcessor:
+    """Tests for the ImageProcessor class."""
+
+    def setup_method(self) -> None:
+        self.processor = ImageProcessor()
+
+    # --- validate_image ---
+
+    def test_validate_png(self) -> None:
+        assert self.processor.validate_image(_make_png_bytes()) is True
+
+    def test_validate_jpeg(self) -> None:
+        assert self.processor.validate_image(_make_jpeg_bytes()) is True
+
+    def test_validate_gif(self) -> None:
+        assert self.processor.validate_image(_make_gif_bytes()) is True
+
+    def test_validate_webp(self) -> None:
+        assert self.processor.validate_image(_make_webp_bytes()) is True
+
+    def test_validate_invalid_data(self) -> None:
+        assert self.processor.validate_image(b"NOT AN IMAGE") is False
+
+    def test_validate_empty_data(self) -> None:
+        assert self.processor.validate_image(b"") is False
+
+    def test_validate_short_data(self) -> None:
+        assert self.processor.validate_image(b"\x89P") is False
+
+    def test_validate_riff_without_webp(self) -> None:
+        # RIFF header but no WEBP tag
+        data = b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * 20
+        assert self.processor.validate_image(data) is False
+
+    # --- load_from_path ---
+
+    def test_load_from_path_png(self, tmp_path: Path) -> None:
+        img = tmp_path / "test.png"
+        png_data = _make_png_bytes()
+        img.write_bytes(png_data)
+
+        b64, mime = self.processor.load_from_path(str(img))
+
+        assert mime == "image/png"
+        assert base64.b64decode(b64) == png_data
+
+    def test_load_from_path_jpeg(self, tmp_path: Path) -> None:
+        img = tmp_path / "test.jpg"
+        jpeg_data = _make_jpeg_bytes()
+        img.write_bytes(jpeg_data)
+
+        _b64, mime = self.processor.load_from_path(str(img))
+
+        assert mime == "image/jpeg"
+
+    def test_load_from_path_missing_file(self) -> None:
+        with pytest.raises(ValueError, match="Image file not found"):
+            self.processor.load_from_path("/nonexistent/image.png")
+
+    def test_load_from_path_not_image(self, tmp_path: Path) -> None:
+        txt = tmp_path / "data.png"
+        txt.write_text("This is not an image")
+
+        with pytest.raises(ValueError, match="not a valid image"):
+            self.processor.load_from_path(str(txt))
+
+    def test_load_from_path_traversal(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="Path traversal"):
+            self.processor.load_from_path(str(tmp_path / ".." / "etc" / "passwd"))
+
+    # --- load_from_url ---
+
+    def test_load_from_url_success(self) -> None:
+        png_data = _make_png_bytes()
+        mock_response = MagicMock()
+        mock_response.content = png_data
+        mock_response.headers = {"content-type": "image/png"}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_response
+
+        with patch("prism.tools.vision.httpx.Client", return_value=mock_client):
+            b64, mime = self.processor.load_from_url("https://example.com/image.png")
+
+        assert mime == "image/png"
+        assert base64.b64decode(b64) == png_data
+
+    def test_load_from_url_invalid_scheme(self) -> None:
+        with pytest.raises(ValueError, match="Unsupported URL scheme"):
+            self.processor.load_from_url("ftp://example.com/image.png")
+
+    def test_load_from_url_fetch_failure(self) -> None:
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.side_effect = OSError("Connection failed")
+
+        with patch("prism.tools.vision.httpx.Client", return_value=mock_client):
+            with pytest.raises(ValueError, match="Failed to fetch"):
+                self.processor.load_from_url("https://example.com/image.png")
+
+    def test_load_from_url_not_image(self) -> None:
+        mock_response = MagicMock()
+        mock_response.content = b"This is not an image at all"
+        mock_response.headers = {"content-type": "text/html"}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_response
+
+        with patch("prism.tools.vision.httpx.Client", return_value=mock_client):
+            with pytest.raises(ValueError, match="valid image"):
+                self.processor.load_from_url("https://example.com/page.html")
+
+    def test_load_from_url_infers_mime_from_magic(self) -> None:
+        """If content-type is missing, MIME is inferred from magic bytes."""
+        jpeg_data = _make_jpeg_bytes()
+        mock_response = MagicMock()
+        mock_response.content = jpeg_data
+        mock_response.headers = {"content-type": "application/octet-stream"}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_response
+
+        with patch("prism.tools.vision.httpx.Client", return_value=mock_client):
+            _, mime = self.processor.load_from_url("https://example.com/photo")
+
+        assert mime == "image/jpeg"
+
+    # --- resize_if_needed ---
+
+    def test_resize_small_data_unchanged(self) -> None:
+        data = b"\x00" * 100
+        assert self.processor.resize_if_needed(data) is data
+
+    def test_resize_at_limit_unchanged(self) -> None:
+        data = b"\x00" * MAX_IMAGE_SIZE_BYTES
+        assert self.processor.resize_if_needed(data) is data
+
+    def test_resize_over_limit_truncated(self) -> None:
+        data = b"\x00" * (MAX_IMAGE_SIZE_BYTES + 1000)
+        result = self.processor.resize_if_needed(data)
+        assert len(result) == MAX_IMAGE_SIZE_BYTES
+
+    def test_resize_custom_max_size(self) -> None:
+        data = b"\x00" * 200
+        result = self.processor.resize_if_needed(data, max_size=100)
+        assert len(result) == 100
+
+    def test_resize_custom_size_under_limit(self) -> None:
+        data = b"\x00" * 50
+        result = self.processor.resize_if_needed(data, max_size=100)
+        assert result is data
+
+
+# =====================================================================
+# TestVisionTool
+# =====================================================================
+
+
+class TestVisionTool:
+    """Tests for the VisionTool class."""
+
+    def setup_method(self) -> None:
+        self.tool = VisionTool()
+
+    # --- properties ---
+
+    def test_name(self) -> None:
+        assert self.tool.name == "analyze_image"
+
+    def test_description(self) -> None:
+        assert "image" in self.tool.description.lower()
+
+    def test_permission_level(self) -> None:
+        assert self.tool.permission_level == PermissionLevel.AUTO
+
+    def test_parameters_schema_has_source(self) -> None:
+        schema = self.tool.parameters_schema
+        assert "source" in schema["properties"]
+        assert "source" in schema["required"]
+
+    def test_parameters_schema_has_prompt(self) -> None:
+        schema = self.tool.parameters_schema
+        assert "prompt" in schema["properties"]
+
+    def test_prompt_not_required(self) -> None:
+        schema = self.tool.parameters_schema
+        assert "prompt" not in schema["required"]
+
+    # --- execute with local file ---
+
+    def test_execute_local_file(self, tmp_path: Path) -> None:
+        img = tmp_path / "test.png"
+        img.write_bytes(_make_png_bytes())
+
+        result = self.tool.execute({
+            "source": str(img),
+            "prompt": "What is in this image?",
+        })
+
+        assert result.success is True
+        assert "image/png" in result.output
+        assert result.metadata is not None
+        assert "vision_message" in result.metadata
+        msg = result.metadata["vision_message"]
+        assert msg["role"] == "user"
+        assert len(msg["content"]) == 2
+
+    def test_execute_local_file_default_prompt(self, tmp_path: Path) -> None:
+        img = tmp_path / "test.jpg"
+        img.write_bytes(_make_jpeg_bytes())
+
+        result = self.tool.execute({"source": str(img)})
+
+        assert result.success is True
+        assert "Describe this image" in result.output
+
+    def test_execute_missing_file(self) -> None:
+        result = self.tool.execute({"source": "/no/such/file.png"})
+
+        assert result.success is False
+        assert result.error is not None
+        assert "not found" in result.error.lower()
+
+    def test_execute_invalid_file(self, tmp_path: Path) -> None:
+        txt = tmp_path / "fake.png"
+        txt.write_text("not an image")
+
+        result = self.tool.execute({"source": str(txt)})
+
+        assert result.success is False
+        assert "not a valid image" in (result.error or "").lower()
+
+    # --- execute with URL ---
+
+    def test_execute_url(self) -> None:
+        png_data = _make_png_bytes()
+        mock_response = MagicMock()
+        mock_response.content = png_data
+        mock_response.headers = {"content-type": "image/png"}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_response
+
+        with patch("prism.tools.vision.httpx.Client", return_value=mock_client):
+            result = self.tool.execute({
+                "source": "https://example.com/photo.png",
+                "prompt": "Analyse this",
+            })
+
+        assert result.success is True
+        assert "image/png" in result.output
+
+    def test_execute_url_failure(self) -> None:
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.side_effect = OSError("timeout")
+
+        with patch("prism.tools.vision.httpx.Client", return_value=mock_client):
+            result = self.tool.execute({
+                "source": "https://example.com/photo.png",
+            })
+
+        assert result.success is False
+        assert "fetch" in (result.error or "").lower()
+
+    # --- execute with base64 ---
+
+    def test_execute_base64_png(self) -> None:
+        png_data = _make_png_bytes()
+        b64 = base64.b64encode(png_data).decode()
+
+        result = self.tool.execute({
+            "source": f"base64:{b64}",
+            "prompt": "What is this?",
+        })
+
+        assert result.success is True
+        assert result.metadata is not None
+        assert result.metadata["mime_type"] == "image/png"
+
+    def test_execute_base64_jpeg(self) -> None:
+        jpeg_data = _make_jpeg_bytes()
+        b64 = base64.b64encode(jpeg_data).decode()
+
+        result = self.tool.execute({"source": f"base64:{b64}"})
+
+        assert result.success is True
+        assert result.metadata is not None
+        assert result.metadata["mime_type"] == "image/jpeg"
+
+    def test_execute_base64_empty(self) -> None:
+        result = self.tool.execute({"source": "base64:"})
+
+        assert result.success is False
+        assert "empty" in (result.error or "").lower()
+
+    def test_execute_base64_invalid(self) -> None:
+        result = self.tool.execute({"source": "base64:NOT_VALID_BASE64!!!"})
+
+        assert result.success is False
+        assert "invalid" in (result.error or "").lower() or "base64" in (result.error or "").lower()
+
+    def test_execute_base64_not_image(self) -> None:
+        b64 = base64.b64encode(b"this is plain text").decode()
+        result = self.tool.execute({"source": f"base64:{b64}"})
+
+        assert result.success is False
+        assert "not a valid image" in (result.error or "").lower()
+
+    # --- argument validation ---
+
+    def test_missing_source_raises(self) -> None:
+        with pytest.raises(ValueError, match="Missing required"):
+            self.tool.execute({})
+
+    def test_vision_message_structure(self, tmp_path: Path) -> None:
+        img = tmp_path / "test.png"
+        img.write_bytes(_make_png_bytes())
+
+        result = self.tool.execute({
+            "source": str(img),
+            "prompt": "Count the objects",
+        })
+
+        msg = result.metadata["vision_message"]
+        assert msg["content"][0]["type"] == "image_url"
+        assert "data:image/png;base64," in msg["content"][0]["image_url"]["url"]
+        assert msg["content"][1]["text"] == "Count the objects"
 
 
 # =====================================================================
@@ -633,7 +1036,7 @@ class TestCompressImage:
 
         compressed_jpeg = _make_jpeg_bytes(2000, 1500)
 
-        def fake_sips_run(cmd, *, capture_output, timeout, check):
+        def fake_sips_run(cmd: list[str], *, capture_output: bool, timeout: int, check: bool) -> MagicMock:
             # Write compressed output to the --out path
             out_path = cmd[-1]
             Path(out_path).write_bytes(compressed_jpeg)

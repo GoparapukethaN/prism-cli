@@ -222,7 +222,11 @@ class CompletionEngine:
         )
 
         backend = self._get_backend()
-        stream = backend.acompletion_streaming(**build_kwargs)
+        # Use acompletion_streaming on mock backends, acompletion on real litellm
+        if hasattr(backend, "acompletion_streaming"):
+            stream = backend.acompletion_streaming(**build_kwargs)
+        else:
+            stream = await backend.acompletion(**build_kwargs)
 
         result = await self._streaming_handler.handle_stream(
             stream=stream,

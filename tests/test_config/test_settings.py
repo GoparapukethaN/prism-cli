@@ -30,6 +30,27 @@ class TestPrismConfig:
         with pytest.raises(ValueError):
             RoutingConfig(simple_threshold=0.5, medium_threshold=0.5)
 
+    def test_tool_use_minimum_tier_default(self) -> None:
+        config = RoutingConfig()
+        assert config.tool_use_minimum_tier == "medium"
+
+    def test_escalate_on_tool_use_default(self) -> None:
+        config = RoutingConfig()
+        assert config.escalate_on_tool_use is True
+
+    def test_tool_use_minimum_tier_valid_values(self) -> None:
+        for tier in ("simple", "medium", "complex"):
+            config = RoutingConfig(tool_use_minimum_tier=tier)
+            assert config.tool_use_minimum_tier == tier
+
+    def test_tool_use_minimum_tier_invalid_rejected(self) -> None:
+        with pytest.raises(ValueError, match="tool_use_minimum_tier"):
+            RoutingConfig(tool_use_minimum_tier="ultra")
+
+    def test_escalate_on_tool_use_false(self) -> None:
+        config = RoutingConfig(escalate_on_tool_use=False)
+        assert config.escalate_on_tool_use is False
+
     def test_budget_limits_accept_none(self) -> None:
         budget = BudgetConfig(daily_limit=None, monthly_limit=None)
         assert budget.daily_limit is None

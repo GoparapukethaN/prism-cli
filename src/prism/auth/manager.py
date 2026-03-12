@@ -39,6 +39,7 @@ KNOWN_PROVIDERS: frozenset[str] = frozenset(
         "deepseek",
         "groq",
         "mistral",
+        "openrouter",
     }
 )
 

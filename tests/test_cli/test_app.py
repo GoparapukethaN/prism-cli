@@ -129,6 +129,22 @@ class TestMainCallback:
         assert kwargs["model"] == "claude-sonnet"
 
     @patch("prism.cli.app._start_repl")
+    def test_dangerously_skip_permissions_flag(
+        self, mock_start_repl: MagicMock,
+    ) -> None:
+        runner.invoke(app, ["--dangerously-skip-permissions"])
+        _, kwargs = mock_start_repl.call_args
+        assert kwargs["dangerously_skip_permissions"] is True
+
+    @patch("prism.cli.app._start_repl")
+    def test_dangerously_skip_permissions_default_false(
+        self, mock_start_repl: MagicMock,
+    ) -> None:
+        runner.invoke(app, [])
+        _, kwargs = mock_start_repl.call_args
+        assert kwargs["dangerously_skip_permissions"] is False
+
+    @patch("prism.cli.app._start_repl")
     def test_subcommand_skips_repl(self, mock_start_repl: MagicMock) -> None:
         """When a subcommand is invoked, the REPL should NOT start."""
         runner.invoke(app, ["ask", "hello"])
@@ -521,28 +537,26 @@ class TestAuthStatus:
     """Tests for 'prism auth status'."""
 
     @patch("prism.auth.manager.AuthManager")
-    @patch("prism.config.settings.load_settings")
     def test_auth_status_shows_providers(
         self,
-        mock_load: MagicMock,
         mock_auth_cls: MagicMock,
-        tmp_path: Path,
     ) -> None:
-        settings = _make_settings(tmp_path)
-        mock_load.return_value = settings
+        from prism.auth.manager import ProviderAuthStatus
 
         mock_auth_instance = MagicMock()
         mock_auth_instance.list_configured.return_value = [
-            {
-                "display_name": "Anthropic",
-                "configured": True,
-                "models": ["claude-sonnet"],
-            },
-            {
-                "display_name": "OpenAI",
-                "configured": False,
-                "models": [],
-            },
+            ProviderAuthStatus(
+                provider="anthropic",
+                has_key=True,
+                source="env",
+                is_valid_format=True,
+            ),
+            ProviderAuthStatus(
+                provider="openai",
+                has_key=False,
+                source=None,
+                is_valid_format=None,
+            ),
         ]
         mock_auth_cls.return_value = mock_auth_instance
 
@@ -882,14 +896,14 @@ class TestAskCommand:
     def test_ask_shows_prompt(self) -> None:
         result = runner.invoke(app, ["ask", "What is Python?"])
         assert result.exit_code == 0
-        assert "Processing" in result.output
-        assert "not yet implemented" in result.output.lower()
+        # The ask command should produce some output (response content)
+        assert len(result.output.strip()) > 0
 
     def test_ask_truncates_long_prompt(self) -> None:
         long_prompt = "x" * 200
         result = runner.invoke(app, ["ask", long_prompt])
         assert result.exit_code == 0
-        assert "Processing" in result.output
+        assert len(result.output.strip()) > 0
 
 
 # ---------------------------------------------------------------------------

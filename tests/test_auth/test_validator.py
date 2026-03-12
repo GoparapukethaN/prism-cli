@@ -88,9 +88,9 @@ class TestKnownProviders:
         providers = KeyValidator.known_providers()
         assert providers == sorted(providers)
 
-    def test_includes_all_six(self):
+    def test_includes_all_providers(self):
         providers = KeyValidator.known_providers()
-        expected = {"anthropic", "deepseek", "google", "groq", "mistral", "openai"}
+        expected = {"anthropic", "deepseek", "google", "groq", "mistral", "openai", "openrouter"}
         assert set(providers) == expected
 
     def test_returns_list_type(self):
