@@ -236,6 +236,42 @@ def _build_completer() -> Any:
 
 
 # ======================================================================
+# UI helpers — Claude CLI-style display
+# ======================================================================
+
+
+def _display_user_message(console: Console, text: str) -> None:
+    """Display the user's message with a highlighted background."""
+    from rich.text import Text as RichText
+
+    chevron = "\u276f"  # heavy right-pointing angle
+    msg = RichText()
+    msg.append(f"{chevron} ", style="bold bright_cyan")
+    msg.append(text)
+    msg.stylize("on grey11")  # subtle dark background highlight
+    # Pad to full terminal width for the background bar effect
+    padding = max(0, console.width - len(f"{chevron} {text}"))
+    msg.append(" " * padding, style="on grey11")
+    console.print(msg)
+
+
+def _display_ai_response(console: Console, content: str) -> None:
+    """Display an AI response with a ● prefix like Claude CLI.
+
+    Shows the response with a cyan bullet indicator and rendered
+    Markdown formatting.
+    """
+    from rich.console import Group
+    from rich.markdown import Markdown as RichMarkdown
+    from rich.text import Text as RichText
+
+    bullet = RichText("● ", style="bold bright_cyan")
+    console.print()
+    console.print(Group(bullet, RichMarkdown(content)))
+    console.print()
+
+
+# ======================================================================
 # Public entry point
 # ======================================================================
 
@@ -439,20 +475,21 @@ def run_repl(
     except Exception as exc:
         logger.debug("module_init_failed", error=str(exc))
 
-    _turn_count = 0  # Track turns for separator display
-
     while True:
         try:
             try:
                 from prompt_toolkit.formatted_text import HTML
                 from rich.rule import Rule
 
-                # Separator line between turns (like Claude CLI)
+                # Input border — thin line above the prompt (like Claude CLI)
                 console.print(Rule(style="dim"))
 
                 user_input = session.prompt(
-                    HTML("<ansibrightcyan><b>&gt; </b></ansibrightcyan>")
+                    HTML("<ansibrightcyan><b>\u276f </b></ansibrightcyan>")
                 ).strip()
+
+                # Line below the prompt input area
+                console.print(Rule(style="dim"))
             except KeyboardInterrupt:
                 continue
             except EOFError:
@@ -461,6 +498,9 @@ def run_repl(
 
             if not user_input:
                 continue
+
+            # Re-display user input with highlighted background
+            _display_user_message(console, user_input)
 
             # Slash command dispatch
             if user_input.startswith("/"):
@@ -472,7 +512,6 @@ def run_repl(
                     dry_run=dry_run,
                     offline=offline,
                 )
-                _turn_count += 1
                 if result == "quit":
                     break
                 continue
@@ -486,7 +525,6 @@ def run_repl(
                 dry_run=dry_run,
                 offline=offline,
             )
-            _turn_count += 1
 
         except Exception:
             logger.exception("repl_error")
@@ -6701,9 +6739,7 @@ def _process_prompt(
                 # If we already streamed the content, skip Rich
                 # markdown rendering (the user saw it live).
                 if not did_stream:
-                    console.print()
-                    console.print(Markdown(content))
-                    console.print()
+                    _display_ai_response(console, content)
                 else:
                     # Streamed output already printed; just add
                     # trailing spacing for visual consistency.
@@ -6746,9 +6782,7 @@ def _process_prompt(
                     state.conversation.append(
                         {"role": "assistant", "content": content2}
                     )
-                    console.print()
-                    console.print(Markdown(content2))
-                    console.print()
+                    _display_ai_response(console, content2)
             except Exception as exc2:
                 logger.debug("fallback_error", error=str(exc2))
                 console.print(
