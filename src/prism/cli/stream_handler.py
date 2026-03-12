@@ -3,7 +3,7 @@
 Uses Rich's Live display to progressively render Markdown as tokens arrive.
 Shows a spinner while waiting for the first token, then switches to
 streaming Markdown with proper word wrapping, syntax highlighting, and
-colored formatting. Response lines are prefixed with a bullet indicator.
+colored formatting.
 """
 
 from __future__ import annotations
@@ -17,24 +17,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-
-def _render_response(text: str) -> object:
-    """Render AI response text with a ● prefix like Claude CLI.
-
-    Returns a Rich renderable that shows a cyan ● bullet on the first
-    line, with the response rendered as Markdown and indented to align.
-    """
-    from rich.console import Group
-    from rich.markdown import Markdown
-    from rich.text import Text
-
-    if not text:
-        return Text("● ", style="bold bright_cyan")
-
-    # Split into first line and rest for the bullet alignment
-    bullet = Text("● ", style="bold bright_cyan")
-    md = Markdown(text)
-    return Group(bullet, md)
+# Bullet prefix for AI responses (like Claude CLI)
+_BULLET = "\u25cf"  # ● solid circle
 
 
 class StreamHandler:
@@ -87,9 +71,10 @@ class StreamHandler:
                 self._live = None
 
             from rich.live import Live
+            from rich.markdown import Markdown
 
             self._live = Live(
-                _render_response(""),
+                Markdown(""),
                 console=self.console,
                 refresh_per_second=30,
                 vertical_overflow="visible",
@@ -103,14 +88,18 @@ class StreamHandler:
 
         # Update live display and force immediate refresh for typing effect
         if self._live is not None:
-            self._live.update(_render_response(self.buffer))
+            from rich.markdown import Markdown
+
+            self._live.update(Markdown(self.buffer))
             self._live.refresh()
 
     def finalize(self) -> str:
         """Stop the Live display and return the full content."""
         if self._live is not None:
             if self._streaming:
-                self._live.update(_render_response(self.buffer))
+                from rich.markdown import Markdown
+
+                self._live.update(Markdown(self.buffer))
             self._live.stop()
             self._live = None
 

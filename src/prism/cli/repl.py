@@ -240,34 +240,12 @@ def _build_completer() -> Any:
 # ======================================================================
 
 
-def _display_user_message(console: Console, text: str) -> None:
-    """Display the user's message with a highlighted background."""
-    from rich.text import Text as RichText
-
-    chevron = "\u276f"  # heavy right-pointing angle
-    msg = RichText()
-    msg.append(f"{chevron} ", style="bold bright_cyan")
-    msg.append(text)
-    msg.stylize("on grey11")  # subtle dark background highlight
-    # Pad to full terminal width for the background bar effect
-    padding = max(0, console.width - len(f"{chevron} {text}"))
-    msg.append(" " * padding, style="on grey11")
-    console.print(msg)
-
-
 def _display_ai_response(console: Console, content: str) -> None:
-    """Display an AI response with a ● prefix like Claude CLI.
-
-    Shows the response with a cyan bullet indicator and rendered
-    Markdown formatting.
-    """
-    from rich.console import Group
+    """Display an AI response with rendered Markdown formatting."""
     from rich.markdown import Markdown as RichMarkdown
-    from rich.text import Text as RichText
 
-    bullet = RichText("● ", style="bold bright_cyan")
     console.print()
-    console.print(Group(bullet, RichMarkdown(content)))
+    console.print(RichMarkdown(content))
     console.print()
 
 
@@ -481,15 +459,12 @@ def run_repl(
                 from prompt_toolkit.formatted_text import HTML
                 from rich.rule import Rule
 
-                # Input border — thin line above the prompt (like Claude CLI)
+                # Thin line above the prompt (like Claude CLI)
                 console.print(Rule(style="dim"))
 
                 user_input = session.prompt(
                     HTML("<ansibrightcyan><b>\u276f </b></ansibrightcyan>")
                 ).strip()
-
-                # Line below the prompt input area
-                console.print(Rule(style="dim"))
             except KeyboardInterrupt:
                 continue
             except EOFError:
@@ -498,9 +473,6 @@ def run_repl(
 
             if not user_input:
                 continue
-
-            # Re-display user input with highlighted background
-            _display_user_message(console, user_input)
 
             # Slash command dispatch
             if user_input.startswith("/"):
