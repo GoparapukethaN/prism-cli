@@ -1,8 +1,17 @@
 # Prism CLI
 
-> Multi-API Intelligent Router CLI -- Claude Code-level capabilities with cost-optimizing routing across every AI provider.
+> Experimental model-routing CLI and developer-tooling playground.
 
-Prism routes your requests to the best AI model for each task, automatically minimizing cost while maximizing quality. It supports 14+ providers out of the box, with fallback chains, budget enforcement, and a full-featured interactive REPL.
+Prism explores a CLI shape for routing requests across LLM providers, tracking cost, and
+experimenting with developer-tool workflows such as context management, project memory,
+and tool execution.
+
+## Status
+
+This repository is an experimental alpha. It is useful as a design and systems-learning
+project, but it should not be read as a finished replacement for production coding
+assistants. The public README intentionally describes the intended architecture and the
+areas under test; features should be verified locally before being treated as complete.
 
 ## Quick Start (Under 5 Minutes)
 
@@ -51,18 +60,14 @@ prism
 prism status
 ```
 
-## Features
+## Feature Areas
 
-- **Intelligent routing** across 14+ AI providers (OpenAI, Anthropic, Google, DeepSeek, Groq, Mistral, Ollama, and more)
-- **Cost optimization** -- automatically picks the cheapest capable model for each task complexity tier
-- **File operations** -- read, write, edit, and search files with path-traversal protection
-- **Terminal execution** -- run commands with a configurable security sandbox
-- **Git integration** -- auto-commit tracked changes with conventional-commit messages, undo, and checkpoint/rollback
-- **Architect mode** -- premium models plan the approach, cheap models execute the steps
-- **Budget enforcement** -- daily and monthly spend limits with dashboards and warnings
-- **Offline mode** -- automatic Ollama fallback when cloud providers are unreachable
-- **Session persistence** -- resume conversations across CLI restarts
-- **Project memory** -- `.prism.md` files give the AI context about your project
+- **Model routing experiments** across multiple provider adapters
+- **Cost tracking concepts** for budget-aware routing
+- **File/tool operation experiments** with path and command guardrails
+- **Git workflow experiments** around checkpoints and history
+- **Architect mode experiments** for separating planning and execution
+- **Session and project memory experiments** using local configuration files
 
 ## REPL Commands
 
@@ -183,7 +188,7 @@ prism config set budget.daily_limit 10.0
 | `PRISM_LOG_LEVEL`    | `log_level`          | Logging verbosity        |
 | `PRISM_HOME`         | `prism_home`         | Data directory override  |
 
-## Cost Optimization
+## Cost Routing Concept
 
 Prism classifies each request into a complexity tier:
 
@@ -193,9 +198,12 @@ Prism classifies each request into a complexity tier:
 | MEDIUM   | "add error handling to this file" | GPT-4o, Claude Sonnet    |
 | COMPLEX  | "refactor this module completely" | Claude Opus, GPT-4o, o1  |
 
-The routing engine scores each available model on quality and cost, using the `quality_weight` setting to balance the tradeoff. Models that exceed the remaining budget are excluded automatically.
+The routing engine is intended to score available models on quality and cost, using the
+`quality_weight` setting to balance the tradeoff. Models that exceed the remaining budget
+are excluded from routing candidates.
 
-**Architect mode** splits complex tasks: a premium model creates the plan, then a cheaper model executes each step -- reducing cost by up to 60% on large refactors.
+**Architect mode** explores splitting complex tasks into planning and execution phases so
+different model choices can be evaluated for each phase.
 
 ## Security
 
