@@ -240,7 +240,7 @@ def _build_completer() -> Any:
 
 
 # ======================================================================
-# UI helpers — Claude CLI-style display
+# UI helpers - terminal response display
 # ======================================================================
 
 
@@ -5711,7 +5711,7 @@ def _estimate_context_tokens(state: _SessionState) -> int:
 
 
 def _load_project_instructions() -> str:
-    """Load project instructions from .prism.md, CLAUDE.md, or .claude.md.
+    """Load project instructions from .prism.md, AGENTS.md, or .agents.md.
 
     Checks the current working directory for project instruction files
     in priority order. Returns the contents of the first file found,
@@ -5722,7 +5722,7 @@ def _load_project_instructions() -> str:
     """
     from pathlib import Path
 
-    instruction_files = (".prism.md", "CLAUDE.md", ".claude.md")
+    instruction_files = (".prism.md", "AGENTS.md", ".agents.md")
     for name in instruction_files:
         path = Path.cwd() / name
         if path.is_file():
@@ -5798,7 +5798,7 @@ def _build_system_prompt() -> dict[str, Any]:
     except Exception:
         logger.debug("project_memory_injection_failed")
 
-    # --- Project instructions (.prism.md / CLAUDE.md / .claude.md) ---
+    # --- Project instructions (.prism.md / AGENTS.md / .agents.md) ---
     project_instructions = _load_project_instructions()
     if project_instructions:
         content += (

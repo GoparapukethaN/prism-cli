@@ -13,6 +13,17 @@ project, but it should not be read as a finished replacement for production codi
 assistants. The public README intentionally describes the intended architecture and the
 areas under test; features should be verified locally before being treated as complete.
 
+## Local Verification
+
+GitHub Actions may be disabled when hosted minutes are unavailable. The local gate is:
+
+```bash
+make verify
+```
+
+That runs Ruff, the pytest suite, and a small CLI smoke test without requiring provider
+API calls.
+
 ## Quick Start (Under 5 Minutes)
 
 ### Install
@@ -221,7 +232,7 @@ Prism includes multiple security layers:
 2. Create a feature branch: `git checkout -b feature/my-feature`
 3. Install dev dependencies: `pip install -e ".[dev,all]"`
 4. Run tests: `pytest`
-5. Run linters: `ruff check src/ tests/ && mypy src/`
+5. Run local verification: `make verify`
 6. Submit a pull request
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.

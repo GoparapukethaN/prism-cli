@@ -10,8 +10,6 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-import pytest
-
 from prism.config.schema import BudgetConfig, PrismConfig, RoutingConfig
 from prism.config.settings import Settings
 from prism.cost.tracker import BudgetAction, CostTracker

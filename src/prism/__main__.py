@@ -6,7 +6,7 @@ import warnings
 
 # Suppress noisy library warnings before anything imports
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
+os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"  # noqa: S105
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_HUB_VERBOSITY"] = "error"
 warnings.filterwarnings("ignore", message=".*unauthenticated.*HF Hub.*")
@@ -15,7 +15,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub")
 logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
 
-from prism.cli.app import main
+from prism.cli.app import main  # noqa: E402
 
 if __name__ == "__main__":
     main()

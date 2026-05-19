@@ -2795,34 +2795,34 @@ class TestLoadProjectInstructions:
         assert "Use pytest for testing" in result
         assert "Prefer async" in result
 
-    def test_claude_md_loaded(self, tmp_path: Path) -> None:
-        """CLAUDE.md should be loaded when .prism.md doesn't exist."""
-        claude_md = tmp_path / "CLAUDE.md"
-        claude_md.write_text("# Claude Instructions\nBe concise.")
+    def test_agents_md_loaded(self, tmp_path: Path) -> None:
+        """AGENTS.md should be loaded when .prism.md doesn't exist."""
+        agents_md = tmp_path / "AGENTS.md"
+        agents_md.write_text("# Project Instructions\nBe concise.")
         from pathlib import Path as _RealPath
         with patch.object(_RealPath, "cwd", return_value=tmp_path):
             result = _load_project_instructions()
-        assert "Claude Instructions" in result
+        assert "Project Instructions" in result
         assert "Be concise" in result
 
-    def test_dot_claude_md_loaded(self, tmp_path: Path) -> None:
-        """.claude.md should be loaded as last fallback."""
-        dot_claude = tmp_path / ".claude.md"
-        dot_claude.write_text("Hidden claude config.")
+    def test_dot_agents_md_loaded(self, tmp_path: Path) -> None:
+        """.agents.md should be loaded as last fallback."""
+        dot_agents = tmp_path / ".agents.md"
+        dot_agents.write_text("Hidden project config.")
         from pathlib import Path as _RealPath
         with patch.object(_RealPath, "cwd", return_value=tmp_path):
             result = _load_project_instructions()
-        assert "Hidden claude config" in result
+        assert "Hidden project config" in result
 
     def test_prism_md_takes_priority(self, tmp_path: Path) -> None:
-        """.prism.md should take priority over CLAUDE.md."""
+        """.prism.md should take priority over AGENTS.md."""
         (tmp_path / ".prism.md").write_text("PRISM RULES")
-        (tmp_path / "CLAUDE.md").write_text("CLAUDE RULES")
+        (tmp_path / "AGENTS.md").write_text("AGENTS RULES")
         from pathlib import Path as _RealPath
         with patch.object(_RealPath, "cwd", return_value=tmp_path):
             result = _load_project_instructions()
         assert "PRISM RULES" in result
-        assert "CLAUDE RULES" not in result
+        assert "AGENTS RULES" not in result
 
     def test_content_capped_at_4000_chars(self, tmp_path: Path) -> None:
         """Content should be truncated to 4000 characters."""
@@ -2837,8 +2837,8 @@ class TestLoadProjectInstructions:
         """If .prism.md can't be read, fall through to next file."""
         prism_md = tmp_path / ".prism.md"
         prism_md.write_text("content")
-        claude_md = tmp_path / "CLAUDE.md"
-        claude_md.write_text("CLAUDE fallback")
+        agents_md = tmp_path / "AGENTS.md"
+        agents_md.write_text("AGENTS fallback")
         from pathlib import Path as _RealPath
         with patch.object(_RealPath, "cwd", return_value=tmp_path):
             # Make .prism.md unreadable by patching read_text
@@ -2853,7 +2853,7 @@ class TestLoadProjectInstructions:
                 _RealPath, "read_text", patched_read,
             ):
                 result = _load_project_instructions()
-        assert "CLAUDE fallback" in result
+        assert "AGENTS fallback" in result
 
 
 class TestBuildSystemPromptIntegration:

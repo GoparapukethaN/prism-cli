@@ -95,7 +95,9 @@ def display_plan(
     table.add_column(
         "#", justify="right", style="cyan", width=4
     )
-    table.add_column("Description", ratio=3)
+    table.add_column(
+        "Description", ratio=3, min_width=11, overflow="fold"
+    )
     table.add_column("Status", justify="center", width=14)
     table.add_column("Tokens", justify="right", width=8)
 
@@ -190,7 +192,7 @@ def display_cost_estimate(
         border_style="dim",
     )
     table.add_column("Step", justify="right", width=6)
-    table.add_column("Description", ratio=3)
+    table.add_column("Description", width=28, overflow="fold")
     table.add_column(
         "Est. Tokens", justify="right", width=12
     )
@@ -583,17 +585,17 @@ def display_plan_review(
         expand=True,
     )
     table.add_column(
-        "Step#", justify="right", style="cyan", width=6
+        "Step#", justify="right", style="cyan", width=5
     )
-    table.add_column("Description", ratio=3)
-    table.add_column("Files", width=20)
+    table.add_column("Description", width=16, overflow="fold")
+    table.add_column("Files", width=12)
     table.add_column(
-        "Risk", justify="center", width=8
+        "Risk", justify="center", width=4
     )
     table.add_column(
-        "Est.Cost", justify="right", width=10
+        "Est.Cost", justify="right", width=8
     )
-    table.add_column("Validation", width=24)
+    table.add_column("Validation", width=14)
 
     for step in sorted(
         plan.steps, key=lambda s: s.order

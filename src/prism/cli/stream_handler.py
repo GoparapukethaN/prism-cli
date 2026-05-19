@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-# Bullet prefix for AI responses (like Claude CLI)
+# Bullet prefix for streamed assistant responses
 _BULLET = "\u25cf"  # ● solid circle
 
 

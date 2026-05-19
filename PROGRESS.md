@@ -1,6 +1,19 @@
 # PROGRESS.md — Prism Development Progress Tracker
 
-## Overall Status: v0.3.0 — Multi-Agent Orchestrator Complete, 5,703+ tests
+## Overall Status: v0.3.0 Audit Snapshot
+
+This file is a development ledger, not a production-readiness claim. The implementation
+has broad test coverage, but the current public status should be read with the
+limitations in `KNOWN_ISSUES.md`.
+
+Latest local audit on 2026-05-19:
+
+- Local verification gate (`make verify`): Ruff clean, full pytest 5,802 passed,
+  15 skipped, and CLI smoke checks passed.
+- Focused routing/config/auth/security/cost test slice: 658 passed, 15 skipped.
+- Full mypy: 169 errors across 38 files.
+- Live provider calls: not validated yet; provider behavior is mostly covered through
+  mocks and deterministic tests.
 
 ### Phase 0: Project Setup (COMPLETE)
 | Task | Status | Notes |
@@ -141,14 +154,15 @@
 - **v0.2.0**: Current (enhanced Phase 3-4, REPL integration, health checks)
 
 ## Completion Metrics
-- Modules completed: 45+ (all phases complete, enhanced, orchestrator fully integrated)
-- Tests: 5,785+ passing, 15 skipped (15 pre-existing cross-test ordering failures)
+- Modules completed: 45+ feature areas implemented and covered by local tests.
+- Tests: current full-suite status should be verified with `make verify`.
 - Test suites: 120+
 - REPL: 40+ fully-wired slash commands (+/aei, /blame, /impact, /swarm, /test, /quality, /optimize, /memory)
 - CLI: prism blame, prism impact, prism test-gaps, prism deps, prism debate, prism why, prism context commands
 - Orchestrator: ~5,000 lines across 4 modules (swarm, debate, moa, cascade), 365 orchestrator tests
-- Ruff: 0 errors
-- Bandit: Clean
+- Ruff: clean in the latest local `make verify` run.
+- Mypy: not clean yet; tracked in `KNOWN_ISSUES.md`.
+- Bandit: reviewed findings are tracked in `KNOWN_ISSUES.md`.
 - Security: No real API keys in codebase, .gitignore verified
 - Phase 3 enhancements: pricing spec match, health checks, architect mode, web browsing
 - Phase 4 enhancements: all 18 items with full REPL integration

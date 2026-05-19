@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Infrastructure
 - Git repository initialized
-- Project structure defined in CLAUDE.md
+- Project structure defined in PROJECT_GUIDE.md
 - All coding conventions established in CONVENTIONS.md
 - CI/CD pipeline designed in CI_CD.md
 - Security model documented in SECURITY.md

@@ -13,8 +13,7 @@ from prism import __app_name__, __version__
 
 app = typer.Typer(
     name=__app_name__,
-    help="Prism — Multi-API Intelligent Router CLI. "
-    "Claude Code-level capabilities with cost-optimizing routing.",
+    help="Prism - experimental model-routing and developer-tooling CLI.",
     no_args_is_help=False,
     add_completion=True,
 )
@@ -996,7 +995,7 @@ def init_project(
 ## Architecture
 <!-- Describe your project structure here -->
 
-## Notes for AI
+## Project Notes
 <!-- Add any special instructions for Prism here -->
 """
     prism_md.write_text(content)

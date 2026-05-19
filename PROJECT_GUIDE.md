@@ -1,22 +1,23 @@
-# CLAUDE.md — Prism Project Instructions
+# PROJECT_GUIDE.md - Prism Project Notes
 
 ## Project Overview
 
-Prism is an open-source CLI tool that provides Claude Code-level capabilities (file system access, terminal execution, web browsing, code generation, natural language conversation) while intelligently routing tasks across every major AI provider at a fraction of the cost. Users bring their own API keys and Prism's routing engine automatically dispatches each task to the cheapest model that can handle it well.
+Prism is an experimental open-source CLI for exploring model routing, cost tracking,
+project memory, guarded tool execution, and developer workflow automation. Users bring
+their own provider keys; local development currently emphasizes deterministic tests,
+mocked provider behavior, and clear boundaries around features that still need live
+provider validation.
 
-## Golden Rules — NEVER Violate These
+## Working Standards
 
-1. **Never truncate code.** Always write complete implementations. Every function, every class, every module — complete.
-2. **Never use placeholders.** No "add logic here", "implement this later", "TODO", or "pass" in production code. If it exists, it must work.
-3. **Always production-ready.** Full error handling, input validation, edge case coverage on every piece of code.
-4. **Always write tests.** Every module gets a corresponding test file. No exceptions.
-5. **Security audit after every module.** Run `bandit`, check for OWASP top 10, validate no secrets leak.
-6. **Code review after every module.** Check for code quality, DRY violations, performance issues, type safety.
-7. **Never hardcode secrets.** API keys, passwords, tokens — always from keyring, env vars, or encrypted config. Never in source.
-8. **Always validate inputs.** Every function that accepts external data must sanitize and validate.
-9. **Always handle edge cases.** Empty strings, None values, negative numbers, concurrent access, network failures.
-10. **Update MEMORY.md and PROGRESS.md after every task.** Non-negotiable tracking.
-11. **Write HANDOFF.md at end of every session.** Future context must be preserved.
+1. Keep implementations complete for the scoped behavior being changed.
+2. Avoid placeholder production paths unless the limitation is explicit and tracked.
+3. Prefer production-style boundaries around external input, file access, subprocesses,
+   provider credentials, and network calls.
+4. Add or update tests when behavior changes.
+5. Run local verification before treating a change as ready.
+6. Keep secrets out of source; use keyring, environment variables, or encrypted config.
+7. Update progress and known-issue docs when verification evidence changes.
 
 ## Tech Stack
 

@@ -2,6 +2,15 @@
 
 ## v0.2.0-beta — Current Issues
 
+### 0. Strict Type Checking Is Not Clean Yet
+**Severity**: Medium
+**Description**: The codebase has a strict `mypy` configuration, but the current full
+type-check run is not clean. The latest local audit found 169 errors across 38 files.
+**Impact**: Runtime tests cover the main implemented behavior, but static typing is not
+yet a reliable release gate.
+**Next Step**: Fix typing module by module, starting with shared models and command
+boundaries.
+
 ### 1. No Live API Testing Yet
 **Severity**: High
 **Description**: All LiteLLM calls use MockLiteLLM during development. No real API calls have been made to any provider. The CompletionEngine, streaming, retry logic, and provider configs need live validation.
@@ -20,10 +29,11 @@
 **Impact**: Cost estimates and context window enforcement may be inaccurate.
 **Mitigation**: Use actual token counts from API responses for cost tracking. tiktoken used when available.
 
-### 4. Git Credential Conflict (Development Machine)
+### 4. Local Git Credential Variability
 **Severity**: Low (local)
-**Description**: `git push` uses cached credential (`kxgst228`) instead of `GoparapukethaN`. The `gh` CLI auth works correctly.
-**Workaround**: Use `GH_TOKEN=$(gh auth token) git push origin main`.
+**Description**: Multi-account development machines can have cached Git credentials
+that do not match the active GitHub CLI account.
+**Workaround**: Verify the active account with `gh auth status` before pushing.
 
 ### 5. Keyring Platform Variability
 **Severity**: Medium

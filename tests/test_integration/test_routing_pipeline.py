@@ -10,8 +10,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 from uuid import uuid4
 
-import pytest
-
 from prism.cost.tracker import CostTracker
 from prism.db.queries import create_session, save_cost_entry
 from prism.exceptions import BudgetExceededError
