@@ -11,7 +11,9 @@ Audit date: 2026-05-20
 - Local verification gate: `PYTHON=.venv/bin/python make verify` passes with Ruff
   clean, full pytest `5817 passed`, and CLI smoke checks.
 - Focused routing/config/auth/security/cost test slice: `658 passed, 15 skipped`.
-- Full mypy: not clean yet (`169 errors in 38 files`).
+- Full mypy: not clean yet (`162 errors in 35 files`).
+- Ruff format check: not clean yet (`209 files would be reformatted`).
+- Bandit: not clean yet (`4` low-severity findings, `1` medium XML parser finding).
 - Live provider calls: not validated yet; provider behavior is mostly covered through
   mocks and deterministic tests.
 - Security review: no real API keys found in the repository during the latest local

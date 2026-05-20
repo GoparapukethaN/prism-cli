@@ -5,7 +5,7 @@
 ### 0. Strict Type Checking Is Not Clean Yet
 **Severity**: Medium
 **Description**: The codebase has a strict `mypy` configuration, but the current full
-type-check run is not clean. The latest local audit found 169 errors across 38 files.
+type-check run is not clean. The latest local audit found 162 errors across 35 files.
 **Impact**: Runtime tests cover the main implemented behavior, but static typing is not
 yet a reliable release gate.
 **Next Step**: Fix typing module by module, starting with shared models and command
@@ -71,10 +71,14 @@ that do not match the active GitHub CLI account.
 **Impact**: Feature unavailable for non-git projects.
 **Mitigation**: Clear error message suggesting `git init`.
 
-### 11. Bandit Findings (All Reviewed, Acceptable)
-**Severity**: Low
-**Description**: Bandit reports 1 HIGH (sandbox.py `shell=True` — intentional for command execution sandbox), 10 MEDIUM (hardcoded SQL table names, XML parsing, urllib, shell completion logging). All are false positives or intentional design.
-**Impact**: None. All findings reviewed and documented.
+### 11. Bandit Findings Need Follow-Up
+**Severity**: Medium
+**Description**: The latest local Bandit run reports 4 low-severity findings and 1
+medium XML parsing finding in `src/prism/intelligence/deps.py`.
+**Impact**: The local smoke gate is clean, but Bandit should not be treated as a clean
+release gate yet.
+**Next Step**: Replace the XML parser path with a safer parser or narrow and document
+the trusted input boundary before enabling Bandit as a blocking gate.
 
 ### 12. Classifier Threshold Sensitivity
 **Severity**: Medium

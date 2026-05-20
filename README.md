@@ -22,7 +22,8 @@ make verify
 ```
 
 That runs Ruff, the pytest suite, and a small CLI smoke test without requiring provider
-API calls.
+API calls. The current recruiter-facing status, non-gating checks, and known validation
+gaps are tracked in [SHOWCASE_STATUS.md](SHOWCASE_STATUS.md).
 
 ## Quick Start (Under 5 Minutes)
 
