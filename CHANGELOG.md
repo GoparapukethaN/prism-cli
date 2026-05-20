@@ -46,44 +46,22 @@ Each release entry follows this format:
 
 ---
 
-## Planned Releases
+## Roadmap Notes
 
-### [0.1.0] - Target: End of Phase 1 Month 3
-- Interactive REPL with multi-model routing
-- File read/write/edit tools with permission controls
-- Task complexity classification (rule-based)
-- Cost-based model selection with fallback chains
-- Budget enforcement (daily/monthly limits)
-- Cost tracking dashboard (`/cost`)
-- tree-sitter repository maps
-- Git integration (auto-commit, `/undo`)
-- `prism init` setup wizard
-- `prism auth add/status` commands
-- Support for: Anthropic, OpenAI, Google, DeepSeek, Groq, Mistral, Ollama
-- PyPI release as `prism-cli`
+This repository is currently source-install only and should be treated as an
+experimental CLI project.
 
-### [0.2.0] - Target: End of Phase 2
-- Terminal execution (sandboxed `execute_command`)
-- Web browsing (Playwright integration)
-- Screenshot tool (multimodal)
-- Architect mode (premium plans, cheap executes)
-- Rolling conversation summarization (`/compact`)
-- Prompt caching (Anthropic)
-- Session persistence and resume
-- Optional ChromaDB RAG
+Short-term cleanup:
 
-### [0.3.0] - Target: End of Phase 3
-- Adaptive routing (ML-based classifier)
-- Outcome tracking and learning
-- Exploration rounds
-- Parallel tool execution
-- Model-specific prompt optimization
-- Context-window-aware routing
+- Keep public docs aligned with local verification.
+- Reduce strict mypy debt.
+- Add live-provider smoke tests before making provider claims stronger.
+- Review optional web/vision dependencies on clean machines.
+- Publish only under a unique distribution name if packaging becomes useful.
 
-### [1.0.0] - Target: End of Phase 4
-- Plugin system with Tool interface
-- Plugin registry and installer
-- Community routing intelligence (opt-in)
-- Web dashboard for analytics
-- Enterprise features (teams, SSO)
-- Full documentation and stable API
+Longer-term ideas:
+
+- More realistic routing benchmarks.
+- Better permission UX for file and command tools.
+- Clearer provider setup docs.
+- Typed boundaries around orchestration modules.

@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "prism-cli"
+name = "prism-routing-cli"
 version = "0.2.0"
 description = "Experimental model-routing CLI and developer-tooling playground"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [
-    { name = "Prism Contributors" },
+    { name = "Kethan Goparapu" },
 ]
 keywords = ["ai", "cli", "llm", "router", "coding-assistant"]
 classifiers = [
@@ -55,7 +55,7 @@ crypto = [
     "cryptography>=42.0.0",
 ]
 all = [
-    "prism-cli[analysis,web,rag,crypto]",
+    "prism-routing-cli[analysis,web,rag,crypto]",
 ]
 dev = [
     "pytest>=8.0.0",

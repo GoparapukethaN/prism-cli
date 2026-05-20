@@ -1,171 +1,51 @@
-# PROGRESS.md — Prism Development Progress Tracker
+# Prism Development Snapshot
 
-## Overall Status: v0.3.0 Audit Snapshot
+This file is a development ledger, not a production-readiness claim. Prism is an
+experimental model-routing CLI with broad local test coverage and several unfinished
+validation areas. For current caveats, see `KNOWN_ISSUES.md`.
 
-This file is a development ledger, not a production-readiness claim. The implementation
-has broad test coverage, but the current public status should be read with the
-limitations in `KNOWN_ISSUES.md`.
+## Latest Local Audit
 
-Latest local audit on 2026-05-19:
+Audit date: 2026-05-20
 
-- Local verification gate (`make verify`): Ruff clean, full pytest 5,802 passed,
-  15 skipped, and CLI smoke checks passed.
-- Focused routing/config/auth/security/cost test slice: 658 passed, 15 skipped.
-- Full mypy: 169 errors across 38 files.
+- Local verification gate: `PYTHON=.venv/bin/python make verify` passes with Ruff
+  clean, full pytest `5817 passed`, and CLI smoke checks.
+- Focused routing/config/auth/security/cost test slice: `658 passed, 15 skipped`.
+- Full mypy: not clean yet (`169 errors in 38 files`).
 - Live provider calls: not validated yet; provider behavior is mostly covered through
   mocks and deterministic tests.
+- Security review: no real API keys found in the repository during the latest local
+  cleanup pass; known security limitations are tracked separately.
 
-### Phase 0: Project Setup (COMPLETE)
-| Task | Status | Notes |
-|------|--------|-------|
-| Read product plan | DONE | Full 490-line plan reviewed |
-| Create instruction files | DONE | All 30 files created (230KB total) |
-| Create pyproject.toml | DONE | hatchling build, all deps configured |
-| Create .gitignore | DONE | Python, IDE, env, secrets patterns |
-| Create LICENSE (Apache 2.0) | DONE | Full license text |
-| Create .env.example | DONE | Template for API keys |
-| Create project scaffolding | DONE | All directories + __init__.py files |
-| Create README.md | DONE | Comprehensive README with quick start |
+## Implemented Areas
 
-### Phase 1: Foundation (COMPLETE)
-| Task | Status | Notes |
-|------|--------|-------|
-| Config module (`src/prism/config/`) | DONE | Settings, defaults, schema validation |
-| Exceptions (`src/prism/exceptions.py`) | DONE | Full hierarchy — 283 lines |
-| Auth module (`src/prism/auth/`) | DONE | Keyring, env vars, encrypted store, validator, manager |
-| Database module (`src/prism/db/`) | DONE | SQLite WAL, models, migrations (v1-v3), queries |
-| Security module (`src/prism/security/`) | DONE | Sandbox, path guard, secret filter (value scrubbing), audit |
-| Provider registry (`src/prism/providers/`) | DONE | Base class, registry, 7 built-in providers |
-| Cost module (`src/prism/cost/`) | DONE | Pricing, tracker, dashboard |
-| Router core (`src/prism/router/`) | DONE | Classifier, selector, fallback, rate limiter, learning |
-| CLI shell (`src/prism/cli/app.py`) | DONE | Typer commands, entry point |
-| Interactive REPL (`src/prism/cli/repl.py`) | DONE | Prompt Toolkit loop |
-| UI rendering (`src/prism/cli/ui/`) | DONE | Display, prompts, themes |
-| Tools module (`src/prism/tools/`) | DONE | File read/write/edit, directory, search, terminal, registry |
-| Context management (`src/prism/context/`) | DONE | Manager, repo map, summarizer, session, memory |
-| Git integration (`src/prism/git/`) | DONE | Operations, auto-commit, undo, checkpoints |
+These areas have code and local tests, but they should still be treated as experimental
+until live-provider validation and type-checking debt are handled.
 
-### Phase 2: Advanced Features (COMPLETE)
-| Task | Status | Notes |
-|------|--------|-------|
-| LiteLLM integration (`src/prism/llm/`) | DONE | CompletionEngine, retry, streaming, validation, mock layer |
-| Extended provider configs (14+ providers) | DONE | Kimi, Perplexity, Qwen, Cohere, Together, Fireworks, etc. |
-| Health checker | DONE | Provider health checking |
-| Architect mode (`src/prism/architect/`) | DONE | Planner, executor, storage, display, DB migration v2 |
-| REPL slash commands (18 commands) | DONE | /cost, /model, /undo, /compact, /add, /drop, /web, etc. |
-| Web browsing tools | DONE | BrowseWebTool (httpx + Playwright), ScreenshotTool |
-| Init wizard (`prism init`) | DONE | OS detection, API key setup, Ollama detection, config creation |
-| Offline mode (`src/prism/network/`) | DONE | ConnectivityChecker, OfflineRouter |
-| Error handler | DONE | UserError with suggestions, error codes |
-| Shell completion | DONE | Bash/Zsh/Fish completion scripts |
-| Version/update commands | DONE | Version display, update check |
-| Enhanced logging | DONE | SecretScrubber, rotation, audit log |
-| Enhanced adaptive learning | DONE | FeedbackTracker, RoutingDataExporter, DB migration v3 |
-| Enhanced git (undo, checkpoint) | DONE | undo_last_commit, checkpoints, gitignore management |
-| Enhanced config (show/set/validate) | DONE | Config commands with YAML validation |
-| Integration tests | DONE | Full pipeline: routing, conversation, security, budget, interrupt |
-| Documentation (README) | DONE | Quick start, features, provider guide, architecture |
+| Area | Current Evidence | Caveat |
+|---|---|---|
+| Configuration and auth | Settings, defaults, key handling, and auth tests | Live provider setup needs more real-world validation |
+| SQLite state and migrations | Database models, queries, migrations, and tests | Long-running upgrade paths need more fixtures |
+| Routing and fallback | Classifier, selector, fallback chains, budgets, and rate limits | Quality/cost choices are not benchmarked against production workloads |
+| Cost tracking | Pricing tables, tracker, dashboard, and forecast tests | Pricing needs periodic provider review |
+| CLI and REPL | Typer commands, prompt-toolkit REPL, slash-command coverage | Some commands are experimental workflows |
+| Tool and file operations | Path guard, secret filtering, audit logging, tool registry | User-facing permission UX needs more manual testing |
+| Context and project memory | Repo map, sessions, summaries, and memory modules | Large-repo behavior needs more profiling |
+| Git workflow helpers | Checkpoints, undo, rollback history, and timeline tests | Needs more manual validation across real repos |
+| Web and vision tools | HTTP/Playwright paths, screenshot/vision helpers, tests | Optional dependencies and provider-specific behavior vary |
+| Orchestration experiments | Debate, mixture-of-agents, cascade, and swarm modules | Research-inspired experiments, not production-agent guarantees |
 
-### Phase 3: Core Infrastructure (COMPLETE)
-| Task | Status | Notes |
-|------|--------|-------|
-| 1. LiteLLM live integration | DONE | Prompt caching, provider error handling, fallback chains, parallel requests, per-provider timeouts, provider dashboard, 51 tests |
-| 2. Architect mode enhancements | DONE | Progress tracking, step validation, retry/escalation, Ctrl+C pause, ExecutionSummary, plan JSON export, 45 tests |
-| 3. Web browsing tools enhancements | DONE | search_web (DuckDuckGo), fetch_docs, DomainRateLimiter, rotating user agents, smart content truncation, 26 tests |
+## Current Release Posture
 
-### Phase 4: Missing Features (COMPLETE)
-| Task | Status | Notes |
-|------|--------|-------|
-| 4. Output caching | DONE | SQLite-backed ResponseCache, TTL per tier, file-change invalidation, /cache stats/clear, 67 tests |
-| 5. Vision/multimodal input | DONE | ImageAttachment, process_image, auto-compress, terminal preview (iTerm2/Kitty), 80 tests |
-| 6. Model comparison mode | DONE | ModelComparator, parallel execution, side-by-side display, winner logging, 92 tests |
-| 7. Full rollback history | DONE | RollbackManager, session timeline, undo/restore, colored diffs, 43 tests |
-| 8. Conversation branching | DONE | BranchManager, create/switch/merge/delete branches, JSON persistence, 49 tests |
-| 9. Code execution sandbox | DONE | Docker + subprocess fallback, timeout/memory limits, network isolation, 50 tests |
-| 10. Background task queue | DONE | ThreadPool, desktop notifications (macOS/Linux), persistence, 53 tests |
-| 11. .prismignore file | DONE | .gitignore syntax, 40+ default patterns, add/remove/filter, 82 tests |
-| 12. Privacy mode | DONE | Ollama-only routing, PrivacyViolationError, auto-start Ollama, 81 tests |
-| 13. Proxy/network support | DONE | HTTP/HTTPS/SOCKS5 proxy, per-provider config, SSL certs, 51 tests |
-| 14. Plugin system | DONE | PluginManager, manifest, sandboxed execution, 3 built-in plugins, 79 tests |
-| 15. Cost forecasting | DONE | SpendingVelocity, monthly projection, cheapest alternatives, weekly reports, 76 tests |
-| 16. Multi-project workspace | DONE | WorkspaceManager, project registration/switching, 45 tests |
-| 17. Enhanced offline mode | DONE | OfflineModeManager, continuous monitoring, request queueing, 49 tests |
-| 18. Response streaming interruption | DONE | StreamInterruptHandler, partial response preservation, keep/discard/retry, 71 tests |
+- Public status: experimental/supporting repo.
+- Recommended install path: source install from this repository.
+- PyPI status: not published from this repo under the `prism-cli` name.
+- Profile role: keep as a supporting systems project, not a flagship claim.
 
-### Phase 5: 10 Distinctive Features (COMPLETE)
-| Task | Status | Notes |
-|------|--------|-------|
-| 19. Adaptive Execution Intelligence | ENHANCED | 9 strategies (added ADD_DEFENSIVE_CODE, REVERT_AND_REDESIGN), explain(), /aei REPL, 94 tests |
-| 20. Causal Blame Tracer | ENHANCED | /blame REPL command, prism blame CLI, trace/list/bisect, 67 tests |
-| 21. Living Architecture Map | ENHANCED | /arch mermaid/check/diff subcommands, boundary checking, 89 tests |
-| 22. Cross-Session Debugging Memory | ENHANCED | /debug-memory bugs/forget/export/import subcommands, 73 tests |
-| 23. Predictive Blast Radius Analysis | ENHANCED | load_report(), get_summary(), /impact alias, prism impact CLI, 82 tests |
-| 24. Intelligent Test Gap Hunter | ENHANCED | Semantic gap analysis (error paths, boundary, async, external deps), prism test-gaps CLI (--critical/--fix/--ci/--module), auto test generation, 80+ tests |
-| 25. Autonomous Dependency Health Monitor | ENHANCED | 7 ecosystem parsers (Python/Node/Rust/Go/Ruby/Java), OSV.dev vuln scanning, version-based migration assessment, prism deps CLI (status/audit/unused), /deps REPL, 174 tests |
-| 26. Multi-Model Debate Mode | ENHANCED | 3-round structured debate, DebateConfig/DebateResult/DebateRound dataclasses, generate_report_text, save/list debates, prism debate CLI, /debate REPL, 49+ tests |
-| 27. Temporal Code Archaeologist | ENHANCED | CommitInfo/ArchaeologyReport dataclasses, git blame/log parsing, co-evolution analysis, stability scoring, narrative generation, prism why CLI, /why REPL, 60+ tests |
-| 28. Smart Context Budget Manager | ENHANCED | RelevanceLevel enum, relevance graph with 4 levels, token budget allocation (40/10/50 split), SQLite efficiency tracking, generate_context_display, prism context CLI, /context REPL (show/add/drop/stats), 50+ tests |
+## Next Work
 
-### Phase 6: Production Readiness (COMPLETE)
-| Task | Status | Notes |
-|------|--------|-------|
-| 29. Enhanced init wizard | DONE | Hardware detection, provider health checks, Ollama setup, cost comparison, 76 tests |
-| 30. Shell tab completion | DONE | Bash/Zsh/Fish scripts, 34 REPL commands, model completion, 66 tests |
-| 31. Auto-update system | DONE | PyPI checking, 24h cache, background thread, version info, 50 tests |
-| 32. Performance optimization | DONE | Lazy imports, connection pooling, benchmark suite, startup timer, 65 tests |
-| 33. Configuration migration | DONE | Version-based migration, backup, default config generation, 38 tests |
-| 34. Enhanced logging system | DONE | JSON structured logs, rotation, 4 log categories, secret scrubbing, 53 tests |
-| 35. Open source preparation | DONE | CI/CD workflows, issue templates, PR template, SECURITY.md, CONTRIBUTING.md, CODEOWNERS |
-
-### Phase 7: Multi-Agent Orchestrator (COMPLETE)
-| Task | Status | Notes |
-|------|--------|-------|
-| SwarmOrchestrator 7-phase pipeline | DONE | decompose → research → plan → review → execute → cross-review → integrate |
-| Multi-round debate engine (Du et al.) | DONE | DebateEngine, 2-3 round convergence, consensus detection, 55 tests |
-| Mixture-of-Agents (Wang et al.) | DONE | MixtureOfAgents, parallel generation + LLM-Blender ranking + fusion, 50 tests |
-| Confidence cascading (Chen et al.) | DONE | ConfidenceCascade, FrugalGPT-style try-cheap-first, external judge, 93 tests |
-| Integration: debate → swarm REVIEW phase | DONE | Multi-model plan debate before execution |
-| Integration: cascade → swarm EXECUTE phase | DONE | Cost-efficient model escalation per task |
-| Integration: MoA → swarm EXECUTE for complex tasks | DONE | Parallel generation + fusion for complex subtasks |
-| SwarmConfig for feature control | DONE | Toggle debate/moa/cascade/tools/auto_scale_budget per pipeline |
-| Tool schema passing to execution models | DONE | Models receive read_file/write_file/edit_file/etc. schemas |
-| REPL /swarm command enhanced | DONE | Passes SwarmConfig + ToolRegistry, --budget flag, shows debate/cascade/MoA metadata |
-| Tool execution loop in swarm | DONE | _execute_with_tools: iterative tool-call → result → model loop, max 10 iterations, 30+ tests |
-| Per-phase budget enforcement | DONE | _check_budget returns proceed/skip/stop, per-phase caps, 12 tests |
-| Fallback chains per task | DONE | get_fallback_models with tier escalation, _attempt_fallback, max_retries config, 17 tests |
-| AEI + ContextBudget wiring | DONE | _record_aei_outcome, _get_aei_research_context, _truncate_prompt_to_budget, 8 tests |
-| Project-size scalability | DONE | auto_scale_budget, _context_limits (model-aware), REPL --budget flag, 12 tests |
-| PROGRESS.md / HANDOFF.md updates | DONE | Final session documentation |
-
-### Routing Engine (COMPLETE)
-| Task | Status | Notes |
-|------|--------|-------|
-| Task classifier | DONE | Feature extraction, weighted scoring, threshold tuning |
-| Cost estimator | DONE | Token estimation, model pricing |
-| Model selector | DONE | Quality/cost ranking, exploration |
-| Fallback chains | DONE | Chain building, model failover |
-| Budget enforcement | DONE | Daily/monthly caps |
-| Rate limiter | DONE | Sliding window per-provider |
-| Adaptive learning | DONE | EWMA, exploration, feedback loop |
-
-## Releases
-- **v0.1.0-alpha**: 0a2764e (224 files, 46,759 lines)
-- **v0.2.0-beta**: 7d01c8d (35 new features, all phases complete)
-- **v0.2.0**: Current (enhanced Phase 3-4, REPL integration, health checks)
-
-## Completion Metrics
-- Modules completed: 45+ feature areas implemented and covered by local tests.
-- Tests: current full-suite status should be verified with `make verify`.
-- Test suites: 120+
-- REPL: 40+ fully-wired slash commands (+/aei, /blame, /impact, /swarm, /test, /quality, /optimize, /memory)
-- CLI: prism blame, prism impact, prism test-gaps, prism deps, prism debate, prism why, prism context commands
-- Orchestrator: ~5,000 lines across 4 modules (swarm, debate, moa, cascade), 365 orchestrator tests
-- Ruff: clean in the latest local `make verify` run.
-- Mypy: not clean yet; tracked in `KNOWN_ISSUES.md`.
-- Bandit: reviewed findings are tracked in `KNOWN_ISSUES.md`.
-- Security: No real API keys in codebase, .gitignore verified
-- Phase 3 enhancements: pricing spec match, health checks, architect mode, web browsing
-- Phase 4 enhancements: all 18 items with full REPL integration
-- Phase 5 enhancements: ALL 10 items enhanced
-- Phase 7: Multi-agent orchestrator COMPLETE — debate, MoA, cascade, tool-use loop, budget caps, fallback chains, AEI, context budget, project-size scalability
-- GitHub: CI/CD workflows, issue templates, CONTRIBUTING.md, SECURITY.md
+1. Reduce the strict mypy error count and document the remaining typed boundaries.
+2. Run live-provider validation with OpenAI, Anthropic, Google, and local/Ollama paths.
+3. Turn important provider checks into repeatable smoke tests.
+4. Review command/file permissions through real interactive sessions.
+5. Keep README claims tied to locally verified behavior.

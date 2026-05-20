@@ -26,20 +26,22 @@ API calls.
 
 ## Quick Start (Under 5 Minutes)
 
-### Install
-
-```bash
-pip install prism-cli
-# or
-pipx install prism-cli
-```
-
-For development:
+### Source Install
 
 ```bash
 git clone https://github.com/GoparapukethaN/prism-cli.git
 cd prism-cli
 pip install -e ".[dev,all]"
+```
+
+The `prism` console command is installed from the local checkout. I am keeping this
+source-install path explicit while the project is experimental and before publishing a
+package under a unique distribution name.
+
+For a lighter local install:
+
+```bash
+pip install -e .
 ```
 
 ### Setup

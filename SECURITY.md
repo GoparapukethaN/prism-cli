@@ -37,11 +37,13 @@ Prism has a uniquely sensitive threat surface: it has read/write access to user 
    - Random 16-byte salt, 12-byte nonce per encryption
 
 #### Key Handling Rules
-- Keys NEVER appear in log files, error messages, or stack traces
-- Keys NEVER written to SQLite database
-- Keys NEVER included in git commits (`.gitignore` enforced)
-- Keys NEVER passed to subprocess environments (filtered in `secret_filter.py`)
-- Keys NEVER sent to AI models as part of conversation context
+- Secret filtering is designed to keep keys out of log files, error messages, and
+  stack traces
+- Key material is not intentionally written to the SQLite database
+- `.gitignore` includes credential patterns so local keys are not committed by normal
+  workflows
+- Subprocess environments are filtered through `secret_filter.py`
+- Provider keys are excluded from model conversation context
 - Key validation: minimal API call on storage to confirm validity
 - Key display: always masked except last 4 characters (`sk-ant-...x7Qm`)
 
@@ -156,8 +158,8 @@ Log rotation: 10MB max file size, 5 rotated files kept.
 
 ### 7. Dependency Security
 
-- All dependencies pinned to exact versions in `pyproject.toml`
-- `pip-audit` run in CI to check for known vulnerabilities
+- Dependencies use bounded version ranges in `pyproject.toml`
+- `pip-audit` can be run locally or in CI when hosted checks are available
 - Minimal dependency tree — prefer stdlib over third-party where possible
 - No native extensions except tree-sitter (audited, widely used)
 - Playwright installed separately (`playwright install chromium`) to avoid bloating default install
