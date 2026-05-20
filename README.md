@@ -112,6 +112,9 @@ Inside the interactive REPL, use slash commands:
 The default runtime registry currently exposes these providers. Add API keys with
 `prism auth add <name>` or the matching environment variable:
 
+These provider paths are configured and covered by local/mock tests; live API validation
+has not been completed yet.
+
 | Provider   | Auth name | Environment variable | Notes |
 | ---------- | --------- | -------------------- | ----- |
 | OpenAI     | `openai` | `OPENAI_API_KEY` | GPT-style hosted models |

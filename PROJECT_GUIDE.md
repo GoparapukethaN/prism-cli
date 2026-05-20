@@ -163,15 +163,19 @@ prism/
 
 ## Coding Standards
 
+These are target standards for release hardening. The current local gate is documented in
+[SHOWCASE_STATUS.md](SHOWCASE_STATUS.md), and known non-gating gaps are tracked in
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+
 - **Python 3.11+** minimum
-- **Type hints everywhere** — every function signature, every return type, every variable where non-obvious
-- **Docstrings** on every public function and class (Google style)
-- **ruff** for linting and formatting (replaces black + isort + flake8)
-- **mypy --strict** for type checking
-- **pytest** for testing with minimum 90% coverage
-- All imports sorted: stdlib → third-party → local
+- **Type hints on touched code paths** first; full strict typing is a hardening target
+- **Docstrings** on public functions and classes where behavior is not obvious
+- **ruff** for linting now; format enforcement after a dedicated formatting pass
+- **mypy --strict** as a target release gate, not a current clean gate
+- **pytest** for runtime behavior, with coverage enforcement as a release target
+- Imports sorted: stdlib -> third-party -> local
 - Max line length: 100 characters
-- Use `pathlib.Path` over `os.path` everywhere
+- Use `pathlib.Path` over `os.path` where practical
 - Use `dataclasses` or `pydantic` for data structures
 - Async by default for I/O operations (httpx, LiteLLM calls)
 - Context managers for resource management (DB connections, file handles)
@@ -185,17 +189,17 @@ Types: feat, fix, refactor, test, docs, chore, perf, security
 Scope: cli, router, providers, tools, context, auth, db, cost, git, security, config
 ```
 
-## Security Requirements
+## Security Targets
 
 - All file operations confined to project root via realpath resolution
 - Secret handling is designed to keep API keys out of logs, error messages, and git
 - Command execution sandboxed with timeout, output limits, env filtering
 - Sensitive file patterns excluded from file operations by default
 - Audit log for every tool execution at ~/.prism/audit.log
-- Path traversal prevention on every file operation
-- Input sanitization on every user-facing function
+- Path traversal coverage on file-operation boundaries
+- Input validation on user-facing command boundaries
 
-## Testing Requirements
+## Testing Targets
 
 - Every module has a corresponding test file
 - Unit tests for all business logic
@@ -203,14 +207,16 @@ Scope: cli, router, providers, tools, context, auth, db, cost, git, security, co
 - End-to-end tests for CLI commands
 - Security-focused tests for path traversal, injection, etc.
 - Performance benchmarks for routing decisions
-- Minimum 90% code coverage enforced in CI
+- Minimum 90% code coverage before it is enforced as a release gate
 
 ## After Every Module Completion
 
 1. Run `pytest tests/test_<module>/` — all tests must pass
 2. Run `ruff check src/prism/<module>/` — no lint errors
-3. Run `mypy src/prism/<module>/` — no type errors
-4. Run `bandit -r src/prism/<module>/` — no security issues
+3. Run `mypy src/prism/<module>/` where the module is already type-clean, or record the
+   remaining typing debt in the hardening backlog
+4. Run `bandit -r src/prism/<module>/` for security-sensitive modules, then record any
+   accepted findings before treating the gate as clean
 5. Update PROGRESS.md with completion status
 6. Update MEMORY.md with any new patterns or decisions
 7. Perform code review checklist (see CODE_REVIEW.md)

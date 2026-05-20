@@ -1,14 +1,21 @@
-# CI_CD.md — Prism CI/CD Pipeline
+# CI_CD.md - Proposed Prism CI/CD Pipeline
+
+This document is a target CI/CD design for Prism, not the current enforced release
+process. The current public status is tracked in [SHOWCASE_STATUS.md](SHOWCASE_STATUS.md)
+and [KNOWN_ISSUES.md](KNOWN_ISSUES.md): runtime tests and Ruff lint pass locally, while
+strict mypy, Ruff format, Bandit, pip-audit, and live-provider validation are not release
+gates yet.
 
 ## GitHub Repository
 - **Owner**: GoparapukethaN
-- **Repo**: prism-cli (to be created)
+- **Repo**: prism-cli
 - **Default branch**: main
-- **Protected branch**: main (require PR, require CI pass)
+- **Target protected branch rule**: main requires PR review and clean release gates once
+  the non-gating checks are hardened
 
 ## GitHub Actions Workflows
 
-### 1. CI Pipeline (on every PR and push to main)
+### 1. Proposed CI Pipeline (on every PR and push to main)
 
 ```yaml
 # .github/workflows/ci.yml
@@ -227,30 +234,36 @@ clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +
 ```
 
-## Release Process
+## Proposed Release Process
 
 ### Version Bumping
 1. Update version in `pyproject.toml`
 2. Update CHANGELOG.md with release notes
 3. Create PR with version bump
 4. After merge, tag: `git tag v0.1.0 && git push --tags`
-5. GitHub Actions builds and publishes to PyPI
+5. When release automation is enabled, GitHub Actions can build and publish to PyPI
 
 ### Versioning Scheme
 - **SemVer**: MAJOR.MINOR.PATCH
 - Pre-1.0: breaking changes increment MINOR
 - Post-1.0: breaking changes increment MAJOR
 
-## Quality Gates (PR merge requirements)
+## Target Quality Gates
 
-- [ ] All CI checks pass (lint, typecheck, security, tests)
-- [ ] Code coverage ≥ 90% overall
+- [ ] Ruff lint and runtime tests stay clean
+- [ ] Strict mypy is reduced to zero errors before it becomes blocking
+- [ ] Ruff format is applied in a dedicated mechanical pass before it becomes blocking
+- [ ] Bandit and pip-audit findings are cleaned or documented before they become blocking
+- [ ] Live-provider smoke coverage exists before provider behavior is advertised as
+      validated
+- [ ] Code coverage target is tracked before it becomes a merge requirement
 - [ ] No bandit findings of medium+ severity
 - [ ] No pip-audit vulnerabilities
-- [ ] Tests pass on Ubuntu and macOS
-- [ ] Tests pass on Python 3.11 and 3.12
+- [ ] Tests pass on Python 3.11 and 3.12 before a packaged release
 
 ## Secrets Management (GitHub)
+
+Only needed if release automation and coverage upload are enabled.
 
 | Secret | Purpose |
 |--------|---------|
