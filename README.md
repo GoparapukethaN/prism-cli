@@ -109,24 +109,24 @@ Inside the interactive REPL, use slash commands:
 
 ## Provider Setup
 
-Prism supports the following providers. Add API keys with `prism auth add <name>`:
+The default runtime registry currently exposes these providers. Add API keys with
+`prism auth add <name>` or the matching environment variable:
 
-| Provider   | Key Format         | Free Tier | Notes                          |
-| ---------- | ------------------ | --------- | ------------------------------ |
-| OpenAI     | `sk-...`           | No        | GPT-4o, GPT-4o-mini, o1       |
-| Anthropic  | `sk-ant-...`       | No        | Claude 4, Claude 3.5 Sonnet   |
-| Google     | `AI...`            | Yes       | Gemini 2.0, Gemini 1.5        |
-| DeepSeek   | `sk-...`           | Yes       | DeepSeek-V3, DeepSeek-R1      |
-| Groq       | `gsk_...`          | Yes       | Llama 3, Mixtral (ultra-fast)  |
-| Mistral    | (varies)           | Yes       | Mistral Large, Codestral      |
-| Ollama     | (none)             | Local     | Any GGUF model, fully offline  |
-| Together   | (varies)           | Yes       | Open-source model hosting      |
-| Fireworks  | (varies)           | Yes       | Fast open-source inference     |
-| OpenRouter | `sk-or-...`        | No        | Meta-router for 100+ models    |
-| Cohere     | (varies)           | Yes       | Command R+                     |
-| Perplexity | `pplx-...`         | No        | Search-augmented models        |
-| AWS Bedrock| (IAM credentials)  | No        | Claude, Titan, Llama on AWS    |
-| Azure OpenAI| (varies)          | No        | GPT-4o on Azure infrastructure |
+| Provider   | Auth name | Environment variable | Notes |
+| ---------- | --------- | -------------------- | ----- |
+| OpenAI     | `openai` | `OPENAI_API_KEY` | GPT-style hosted models |
+| Anthropic  | `anthropic` | `ANTHROPIC_API_KEY` | Claude-family hosted models |
+| Google     | `google` | `GOOGLE_API_KEY` | Gemini-family hosted models |
+| DeepSeek   | `deepseek` | `DEEPSEEK_API_KEY` | DeepSeek chat/reasoning models |
+| Groq       | `groq` | `GROQ_API_KEY` | Low-latency hosted open models |
+| Mistral    | `mistral` | `MISTRAL_API_KEY` | Mistral hosted models |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | Aggregated model routing |
+| Ollama     | `ollama` | none | Local models through an Ollama server |
+
+There are experimental provider configuration stubs for Kimi, Perplexity, Qwen, Cohere,
+Together AI, Fireworks AI, and custom OpenAI-compatible endpoints in the source tree.
+Those paths are not part of the default local release gate yet, so I keep them out of the
+primary setup table until they have live-provider smoke coverage.
 
 ## Architecture
 

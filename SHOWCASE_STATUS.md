@@ -18,6 +18,8 @@ That gate currently passes:
 - Ruff lint for `src` and `tests`
 - Full pytest suite: `5817 passed`, `8 warnings`
 - CLI smoke checks for `python -m prism --help` and `python -m prism status`
+- Default provider setup documented for the runtime registry:
+  OpenAI, Anthropic, Google, DeepSeek, Groq, Mistral, OpenRouter, and Ollama
 
 The smoke checks do not require provider API keys.
 
@@ -32,6 +34,7 @@ local gate yet:
 | Strict mypy | `162 errors in 35 files` | Typed boundaries need to be cleaned module by module |
 | Bandit | `4` low findings, `1` medium XML parser finding | The dependency parser path needs a safer XML handling pass |
 | Live providers | Not validated with real API keys | Mocked provider behavior does not prove provider-specific edge cases |
+| Extended provider stubs | Kimi, Perplexity, Qwen, Cohere, Together AI, Fireworks AI, and custom endpoint configs are source-level experiments | They should stay out of the primary setup path until a live smoke proves them |
 
 ## How I Present It
 
