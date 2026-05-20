@@ -208,7 +208,7 @@ class TaskResult:
 # ------------------------------------------------------------------
 
 _SELF_ASSESS_SYSTEM_PROMPT = """\
-You are a confidence assessment engine.  Given an AI-generated output and the
+You are a confidence assessment engine.  Given a model response and the
 original prompt, assess how confident you are that the output is correct,
 complete, and high quality.
 

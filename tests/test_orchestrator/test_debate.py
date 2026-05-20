@@ -715,7 +715,7 @@ class TestDebateFullPipeline:
         """Debate accepts and uses context string."""
         result = await debate_engine.debate(
             "Should we refactor the auth module?",
-            context="Current auth uses JWT. 500 daily active users.",
+            context="Current auth uses JWT. 500 daily requests.",
         )
         assert isinstance(result, DebateResult)
         assert len(result.rounds) >= 1
