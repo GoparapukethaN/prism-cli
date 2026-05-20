@@ -29,7 +29,7 @@ curl http://localhost:11434/api/tags
 
 ### Optional: Playwright (for web browsing)
 ```bash
-pip install prism-cli[web]
+pip install -e ".[web]"
 playwright install chromium
 ```
 

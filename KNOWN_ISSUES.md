@@ -51,7 +51,7 @@ that do not match the active GitHub CLI account.
 **Severity**: Low
 **Description**: Playwright downloads ~400MB of Chromium. Not included by default.
 **Impact**: Long install for `[web]` extra.
-**Mitigation**: By design — `pip install prism-cli[web]` is optional. httpx path available for basic browsing.
+**Mitigation**: By design — source install with `pip install -e ".[web]"` is optional. httpx path available for basic browsing.
 
 ### 8. OSV.dev API Requires Network
 **Severity**: Medium

@@ -12,7 +12,7 @@ provider validation.
 
 1. Keep implementations complete for the scoped behavior being changed.
 2. Avoid placeholder production paths unless the limitation is explicit and tracked.
-3. Prefer production-style boundaries around external input, file access, subprocesses,
+3. Prefer clear boundaries around external input, file access, subprocesses,
    provider credentials, and network calls.
 4. Add or update tests when behavior changes.
 5. Run local verification before treating a change as ready.
@@ -188,7 +188,7 @@ Scope: cli, router, providers, tools, context, auth, db, cost, git, security, co
 ## Security Requirements
 
 - All file operations confined to project root via realpath resolution
-- API keys never logged, never in error messages, never in git
+- Secret handling is designed to keep API keys out of logs, error messages, and git
 - Command execution sandboxed with timeout, output limits, env filtering
 - Sensitive file patterns excluded from file operations by default
 - Audit log for every tool execution at ~/.prism/audit.log

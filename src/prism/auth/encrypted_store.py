@@ -8,8 +8,8 @@ File layout of ``~/.prism/credentials.enc``::
 
     [ 16-byte salt ][ Fernet-encrypted JSON payload ]
 
-The ``cryptography`` package is an **optional** dependency (``pip install
-prism-cli[crypto]``).  All public methods raise ``AuthError`` (not raw
+The ``cryptography`` package is an **optional** dependency (source install with
+``pip install -e ".[crypto]"``).  All public methods raise ``AuthError`` (not raw
 ``ImportError``) when the library is missing.
 """
 
@@ -135,7 +135,7 @@ class EncryptedStore:
         except ImportError as exc:
             raise AuthError(
                 "The 'cryptography' package is required for the encrypted "
-                "credential store.  Install it with:  pip install prism-cli[crypto]"
+                'credential store.  Install it with:  pip install -e ".[crypto]"'
             ) from exc
 
         kdf = PBKDF2HMAC(
@@ -161,7 +161,7 @@ class EncryptedStore:
         except ImportError as exc:
             raise AuthError(
                 "The 'cryptography' package is required for the encrypted "
-                "credential store.  Install it with:  pip install prism-cli[crypto]"
+                'credential store.  Install it with:  pip install -e ".[crypto]"'
             ) from exc
 
         if not self._path.is_file():
@@ -218,7 +218,7 @@ class EncryptedStore:
         except ImportError as exc:
             raise AuthError(
                 "The 'cryptography' package is required for the encrypted "
-                "credential store.  Install it with:  pip install prism-cli[crypto]"
+                'credential store.  Install it with:  pip install -e ".[crypto]"'
             ) from exc
 
         salt = os.urandom(_SALT_LENGTH)

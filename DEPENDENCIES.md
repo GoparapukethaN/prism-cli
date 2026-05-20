@@ -18,12 +18,12 @@
 ### Optional Runtime Dependencies
 | Package | Version | Purpose | Install Extra |
 |---------|---------|---------|---------------|
-| tree-sitter | ≥0.22.0 | AST parsing for repo maps | `prism-cli[analysis]` |
-| tree-sitter-languages | ≥1.10.0 | Language grammars | `prism-cli[analysis]` |
-| playwright | ≥1.40.0 | Web browsing and screenshots | `prism-cli[web]` |
-| beautifulsoup4 | ≥4.12.0 | HTML content extraction | `prism-cli[web]` |
-| chromadb | ≥0.5.0 | Vector search RAG | `prism-cli[rag]` |
-| cryptography | ≥42.0.0 | Encrypted credential storage | `prism-cli[crypto]` |
+| tree-sitter | ≥0.22.0 | AST parsing for repo maps | `.[analysis]` |
+| tree-sitter-languages | ≥1.10.0 | Language grammars | `.[analysis]` |
+| playwright | ≥1.40.0 | Web browsing and screenshots | `.[web]` |
+| beautifulsoup4 | ≥4.12.0 | HTML content extraction | `.[web]` |
+| chromadb | ≥0.5.0 | Vector search RAG | `.[rag]` |
+| cryptography | ≥42.0.0 | Encrypted credential storage | `.[crypto]` |
 | unidiff | ≥0.7.0 | Unified diff parsing | Yes |
 | watchdog | ≥4.0.0 | File change detection | Yes |
 
@@ -79,7 +79,7 @@ crypto = [
     "cryptography>=42.0.0",
 ]
 all = [
-    "prism-cli[analysis,web,rag,crypto]",
+    "prism-routing-cli[analysis,web,rag,crypto]",
 ]
 dev = [
     "pytest>=8.0.0",
